@@ -1,0 +1,2215 @@
+import ffi as c (C!)
+
+
+pub const off_t = c.long
+pub const size_t = c.ulong
+
+pub const __s8  = c.i8
+pub const __s16 = c.i16
+pub const __s32 = c.i32
+pub const __s64 = c.i64
+
+pub const __u8  = c.u8
+pub const __u16 = c.u16
+pub const __u32 = c.u32
+pub const __u64 = c.u64
+
+pub const __aligned_u64 = c.ptr
+
+// C! pub struct bpf_insn {
+// 	__u8    code;		/* opcode */
+// 	// __u8	dst_reg:4;	/* dest register */
+// 	// __u8	src_reg:4;	/* source register */
+//         __u8    reg;            /* dst_reg:4 | src_reg:4 */
+// 	__s16   off;		/* signed offset */
+// 	__s32   imm;		/* signed immediate constant */
+// };
+// 
+// /* Header for bpf_lpm_trie_key structs */
+// struct bpf_lpm_trie_key_hdr {
+// 	__u32	prefixlen;
+// };
+// 
+// /* Key of an a BPF_MAP_TYPE_LPM_TRIE entry, with trailing byte array. */
+// struct bpf_lpm_trie_key_u8 {
+// 	union {
+// 		struct bpf_lpm_trie_key_hdr	hdr;
+// 		__u32				prefixlen;
+// 	};
+// 	__u8	data[];		/* Arbitrary size */
+// };
+// 
+// struct bpf_cgroup_storage_key {
+// 	__u64	cgroup_inode_id;	/* cgroup inode id */
+// 	__u32	attach_type;		/* program attach type (enum bpf_attach_type) */
+// };
+// 
+// enum bpf_cgroup_iter_order {
+// 	BPF_CGROUP_ITER_ORDER_UNSPEC = 0,
+// 	BPF_CGROUP_ITER_SELF_ONLY,		/* process only a single object. */
+// 	BPF_CGROUP_ITER_DESCENDANTS_PRE,	/* walk descendants in pre-order. */
+// 	BPF_CGROUP_ITER_DESCENDANTS_POST,	/* walk descendants in post-order. */
+// 	BPF_CGROUP_ITER_ANCESTORS_UP,		/* walk ancestors upward. */
+// };
+// 
+// union bpf_iter_link_info {
+// 	struct {
+// 		__u32	map_fd;
+// 	} map;
+// 	struct {
+// 		enum bpf_cgroup_iter_order order;
+// 
+// 		/* At most one of cgroup_fd and cgroup_id can be non-zero. If
+// 		 * both are zero, the walk starts from the default cgroup v2
+// 		 * root. For walking v1 hierarchy, one should always explicitly
+// 		 * specify cgroup_fd.
+// 		 */
+// 		__u32	cgroup_fd;
+// 		__u64	cgroup_id;
+// 	} cgroup;
+// 	/* Parameters of task iterators. */
+// 	struct {
+// 		__u32	tid;
+// 		__u32	pid;
+// 		__u32	pid_fd;
+// 	} task;
+// };
+// 
+// /* BPF syscall commands, see bpf(2) man-page for more details. */
+// /**
+//  * DOC: eBPF Syscall Preamble
+//  *
+//  * The operation to be performed by the **bpf**\ () system call is determined
+//  * by the *cmd* argument. Each operation takes an accompanying argument,
+//  * provided via *attr*, which is a pointer to a union of type *bpf_attr* (see
+//  * below). The size argument is the size of the union pointed to by *attr*.
+//  */
+// /**
+//  * DOC: eBPF Syscall Commands
+//  *
+//  * BPF_MAP_CREATE
+//  *	Description
+//  *		Create a map and return a file descriptor that refers to the
+//  *		map. The close-on-exec file descriptor flag (see **fcntl**\ (2))
+//  *		is automatically enabled for the new file descriptor.
+//  *
+//  *		Applying **close**\ (2) to the file descriptor returned by
+//  *		**BPF_MAP_CREATE** will delete the map (but see NOTES).
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_MAP_LOOKUP_ELEM
+//  *	Description
+//  *		Look up an element with a given *key* in the map referred to
+//  *		by the file descriptor *map_fd*.
+//  *
+//  *		The *flags* argument may be specified as one of the
+//  *		following:
+//  *
+//  *		**BPF_F_LOCK**
+//  *			Look up the value of a spin-locked map without
+//  *			returning the lock. This must be specified if the
+//  *			elements contain a spinlock.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_MAP_UPDATE_ELEM
+//  *	Description
+//  *		Create or update an element (key/value pair) in a specified map.
+//  *
+//  *		The *flags* argument should be specified as one of the
+//  *		following:
+//  *
+//  *		**BPF_ANY**
+//  *			Create a new element or update an existing element.
+//  *		**BPF_NOEXIST**
+//  *			Create a new element only if it did not exist.
+//  *		**BPF_EXIST**
+//  *			Update an existing element.
+//  *		**BPF_F_LOCK**
+//  *			Update a spin_lock-ed map element.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  *		May set *errno* to **EINVAL**, **EPERM**, **ENOMEM**,
+//  *		**E2BIG**, **EEXIST**, or **ENOENT**.
+//  *
+//  *		**E2BIG**
+//  *			The number of elements in the map reached the
+//  *			*max_entries* limit specified at map creation time.
+//  *		**EEXIST**
+//  *			If *flags* specifies **BPF_NOEXIST** and the element
+//  *			with *key* already exists in the map.
+//  *		**ENOENT**
+//  *			If *flags* specifies **BPF_EXIST** and the element with
+//  *			*key* does not exist in the map.
+//  *
+//  * BPF_MAP_DELETE_ELEM
+//  *	Description
+//  *		Look up and delete an element by key in a specified map.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_MAP_GET_NEXT_KEY
+//  *	Description
+//  *		Look up an element by key in a specified map and return the key
+//  *		of the next element. Can be used to iterate over all elements
+//  *		in the map.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  *		The following cases can be used to iterate over all elements of
+//  *		the map:
+//  *
+//  *		* If *key* is not found, the operation returns zero and sets
+//  *		  the *next_key* pointer to the key of the first element.
+//  *		* If *key* is found, the operation returns zero and sets the
+//  *		  *next_key* pointer to the key of the next element.
+//  *		* If *key* is the last element, returns -1 and *errno* is set
+//  *		  to **ENOENT**.
+//  *
+//  *		May set *errno* to **ENOMEM**, **EFAULT**, **EPERM**, or
+//  *		**EINVAL** on error.
+//  *
+//  * BPF_PROG_LOAD
+//  *	Description
+//  *		Verify and load an eBPF program, returning a new file
+//  *		descriptor associated with the program.
+//  *
+//  *		Applying **close**\ (2) to the file descriptor returned by
+//  *		**BPF_PROG_LOAD** will unload the eBPF program (but see NOTES).
+//  *
+//  *		The close-on-exec file descriptor flag (see **fcntl**\ (2)) is
+//  *		automatically enabled for the new file descriptor.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_OBJ_PIN
+//  *	Description
+//  *		Pin an eBPF program or map referred by the specified *bpf_fd*
+//  *		to the provided *pathname* on the filesystem.
+//  *
+//  *		The *pathname* argument must not contain a dot (".").
+//  *
+//  *		On success, *pathname* retains a reference to the eBPF object,
+//  *		preventing deallocation of the object when the original
+//  *		*bpf_fd* is closed. This allow the eBPF object to live beyond
+//  *		**close**\ (\ *bpf_fd*\ ), and hence the lifetime of the parent
+//  *		process.
+//  *
+//  *		Applying **unlink**\ (2) or similar calls to the *pathname*
+//  *		unpins the object from the filesystem, removing the reference.
+//  *		If no other file descriptors or filesystem nodes refer to the
+//  *		same object, it will be deallocated (see NOTES).
+//  *
+//  *		The filesystem type for the parent directory of *pathname* must
+//  *		be **BPF_FS_MAGIC**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_OBJ_GET
+//  *	Description
+//  *		Open a file descriptor for the eBPF object pinned to the
+//  *		specified *pathname*.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_PROG_ATTACH
+//  *	Description
+//  *		Attach an eBPF program to a *target_fd* at the specified
+//  *		*attach_type* hook.
+//  *
+//  *		The *attach_type* specifies the eBPF attachment point to
+//  *		attach the program to, and must be one of *bpf_attach_type*
+//  *		(see below).
+//  *
+//  *		The *attach_bpf_fd* must be a valid file descriptor for a
+//  *		loaded eBPF program of a cgroup, flow dissector, LIRC, sockmap
+//  *		or sock_ops type corresponding to the specified *attach_type*.
+//  *
+//  *		The *target_fd* must be a valid file descriptor for a kernel
+//  *		object which depends on the attach type of *attach_bpf_fd*:
+//  *
+//  *		**BPF_PROG_TYPE_CGROUP_DEVICE**,
+//  *		**BPF_PROG_TYPE_CGROUP_SKB**,
+//  *		**BPF_PROG_TYPE_CGROUP_SOCK**,
+//  *		**BPF_PROG_TYPE_CGROUP_SOCK_ADDR**,
+//  *		**BPF_PROG_TYPE_CGROUP_SOCKOPT**,
+//  *		**BPF_PROG_TYPE_CGROUP_SYSCTL**,
+//  *		**BPF_PROG_TYPE_SOCK_OPS**
+//  *
+//  *			Control Group v2 hierarchy with the eBPF controller
+//  *			enabled. Requires the kernel to be compiled with
+//  *			**CONFIG_CGROUP_BPF**.
+//  *
+//  *		**BPF_PROG_TYPE_FLOW_DISSECTOR**
+//  *
+//  *			Network namespace (eg /proc/self/ns/net).
+//  *
+//  *		**BPF_PROG_TYPE_LIRC_MODE2**
+//  *
+//  *			LIRC device path (eg /dev/lircN). Requires the kernel
+//  *			to be compiled with **CONFIG_BPF_LIRC_MODE2**.
+//  *
+//  *		**BPF_PROG_TYPE_SK_SKB**,
+//  *		**BPF_PROG_TYPE_SK_MSG**
+//  *
+//  *			eBPF map of socket type (eg **BPF_MAP_TYPE_SOCKHASH**).
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_PROG_DETACH
+//  *	Description
+//  *		Detach the eBPF program associated with the *target_fd* at the
+//  *		hook specified by *attach_type*. The program must have been
+//  *		previously attached using **BPF_PROG_ATTACH**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_PROG_TEST_RUN
+//  *	Description
+//  *		Run the eBPF program associated with the *prog_fd* a *repeat*
+//  *		number of times against a provided program context *ctx_in* and
+//  *		data *data_in*, and return the modified program context
+//  *		*ctx_out*, *data_out* (for example, packet data), result of the
+//  *		execution *retval*, and *duration* of the test run.
+//  *
+//  *		The sizes of the buffers provided as input and output
+//  *		parameters *ctx_in*, *ctx_out*, *data_in*, and *data_out* must
+//  *		be provided in the corresponding variables *ctx_size_in*,
+//  *		*ctx_size_out*, *data_size_in*, and/or *data_size_out*. If any
+//  *		of these parameters are not provided (ie set to NULL), the
+//  *		corresponding size field must be zero.
+//  *
+//  *		Some program types have particular requirements:
+//  *
+//  *		**BPF_PROG_TYPE_SK_LOOKUP**
+//  *			*data_in* and *data_out* must be NULL.
+//  *
+//  *		**BPF_PROG_TYPE_RAW_TRACEPOINT**,
+//  *		**BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE**
+//  *
+//  *			*ctx_out*, *data_in* and *data_out* must be NULL.
+//  *			*repeat* must be zero.
+//  *
+//  *		BPF_PROG_RUN is an alias for BPF_PROG_TEST_RUN.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  *		**ENOSPC**
+//  *			Either *data_size_out* or *ctx_size_out* is too small.
+//  *		**ENOTSUPP**
+//  *			This command is not supported by the program type of
+//  *			the program referred to by *prog_fd*.
+//  *
+//  * BPF_PROG_GET_NEXT_ID
+//  *	Description
+//  *		Fetch the next eBPF program currently loaded into the kernel.
+//  *
+//  *		Looks for the eBPF program with an id greater than *start_id*
+//  *		and updates *next_id* on success. If no other eBPF programs
+//  *		remain with ids higher than *start_id*, returns -1 and sets
+//  *		*errno* to **ENOENT**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, or when no id remains, -1
+//  *		is returned and *errno* is set appropriately.
+//  *
+//  * BPF_MAP_GET_NEXT_ID
+//  *	Description
+//  *		Fetch the next eBPF map currently loaded into the kernel.
+//  *
+//  *		Looks for the eBPF map with an id greater than *start_id*
+//  *		and updates *next_id* on success. If no other eBPF maps
+//  *		remain with ids higher than *start_id*, returns -1 and sets
+//  *		*errno* to **ENOENT**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, or when no id remains, -1
+//  *		is returned and *errno* is set appropriately.
+//  *
+//  * BPF_PROG_GET_FD_BY_ID
+//  *	Description
+//  *		Open a file descriptor for the eBPF program corresponding to
+//  *		*prog_id*.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_MAP_GET_FD_BY_ID
+//  *	Description
+//  *		Open a file descriptor for the eBPF map corresponding to
+//  *		*map_id*.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_OBJ_GET_INFO_BY_FD
+//  *	Description
+//  *		Obtain information about the eBPF object corresponding to
+//  *		*bpf_fd*.
+//  *
+//  *		Populates up to *info_len* bytes of *info*, which will be in
+//  *		one of the following formats depending on the eBPF object type
+//  *		of *bpf_fd*:
+//  *
+//  *		* **struct bpf_prog_info**
+//  *		* **struct bpf_map_info**
+//  *		* **struct bpf_btf_info**
+//  *		* **struct bpf_link_info**
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_PROG_QUERY
+//  *	Description
+//  *		Obtain information about eBPF programs associated with the
+//  *		specified *attach_type* hook.
+//  *
+//  *		The *target_fd* must be a valid file descriptor for a kernel
+//  *		object which depends on the attach type of *attach_bpf_fd*:
+//  *
+//  *		**BPF_PROG_TYPE_CGROUP_DEVICE**,
+//  *		**BPF_PROG_TYPE_CGROUP_SKB**,
+//  *		**BPF_PROG_TYPE_CGROUP_SOCK**,
+//  *		**BPF_PROG_TYPE_CGROUP_SOCK_ADDR**,
+//  *		**BPF_PROG_TYPE_CGROUP_SOCKOPT**,
+//  *		**BPF_PROG_TYPE_CGROUP_SYSCTL**,
+//  *		**BPF_PROG_TYPE_SOCK_OPS**
+//  *
+//  *			Control Group v2 hierarchy with the eBPF controller
+//  *			enabled. Requires the kernel to be compiled with
+//  *			**CONFIG_CGROUP_BPF**.
+//  *
+//  *		**BPF_PROG_TYPE_FLOW_DISSECTOR**
+//  *
+//  *			Network namespace (eg /proc/self/ns/net).
+//  *
+//  *		**BPF_PROG_TYPE_LIRC_MODE2**
+//  *
+//  *			LIRC device path (eg /dev/lircN). Requires the kernel
+//  *			to be compiled with **CONFIG_BPF_LIRC_MODE2**.
+//  *
+//  *		**BPF_PROG_QUERY** always fetches the number of programs
+//  *		attached and the *attach_flags* which were used to attach those
+//  *		programs. Additionally, if *prog_ids* is nonzero and the number
+//  *		of attached programs is less than *prog_cnt*, populates
+//  *		*prog_ids* with the eBPF program ids of the programs attached
+//  *		at *target_fd*.
+//  *
+//  *		The following flags may alter the result:
+//  *
+//  *		**BPF_F_QUERY_EFFECTIVE**
+//  *			Only return information regarding programs which are
+//  *			currently effective at the specified *target_fd*.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_RAW_TRACEPOINT_OPEN
+//  *	Description
+//  *		Attach an eBPF program to a tracepoint *name* to access kernel
+//  *		internal arguments of the tracepoint in their raw form.
+//  *
+//  *		The *prog_fd* must be a valid file descriptor associated with
+//  *		a loaded eBPF program of type **BPF_PROG_TYPE_RAW_TRACEPOINT**.
+//  *
+//  *		No ABI guarantees are made about the content of tracepoint
+//  *		arguments exposed to the corresponding eBPF program.
+//  *
+//  *		Applying **close**\ (2) to the file descriptor returned by
+//  *		**BPF_RAW_TRACEPOINT_OPEN** will delete the map (but see NOTES).
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_BTF_LOAD
+//  *	Description
+//  *		Verify and load BPF Type Format (BTF) metadata into the kernel,
+//  *		returning a new file descriptor associated with the metadata.
+//  *		BTF is described in more detail at
+//  *		https://www.kernel.org/doc/html/latest/bpf/btf.html.
+//  *
+//  *		The *btf* parameter must point to valid memory providing
+//  *		*btf_size* bytes of BTF binary metadata.
+//  *
+//  *		The returned file descriptor can be passed to other **bpf**\ ()
+//  *		subcommands such as **BPF_PROG_LOAD** or **BPF_MAP_CREATE** to
+//  *		associate the BTF with those objects.
+//  *
+//  *		Similar to **BPF_PROG_LOAD**, **BPF_BTF_LOAD** has optional
+//  *		parameters to specify a *btf_log_buf*, *btf_log_size* and
+//  *		*btf_log_level* which allow the kernel to return freeform log
+//  *		output regarding the BTF verification process.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_BTF_GET_FD_BY_ID
+//  *	Description
+//  *		Open a file descriptor for the BPF Type Format (BTF)
+//  *		corresponding to *btf_id*.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_TASK_FD_QUERY
+//  *	Description
+//  *		Obtain information about eBPF programs associated with the
+//  *		target process identified by *pid* and *fd*.
+//  *
+//  *		If the *pid* and *fd* are associated with a tracepoint, kprobe
+//  *		or uprobe perf event, then the *prog_id* and *fd_type* will
+//  *		be populated with the eBPF program id and file descriptor type
+//  *		of type **bpf_task_fd_type**. If associated with a kprobe or
+//  *		uprobe, the  *probe_offset* and *probe_addr* will also be
+//  *		populated. Optionally, if *buf* is provided, then up to
+//  *		*buf_len* bytes of *buf* will be populated with the name of
+//  *		the tracepoint, kprobe or uprobe.
+//  *
+//  *		The resulting *prog_id* may be introspected in deeper detail
+//  *		using **BPF_PROG_GET_FD_BY_ID** and **BPF_OBJ_GET_INFO_BY_FD**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_MAP_LOOKUP_AND_DELETE_ELEM
+//  *	Description
+//  *		Look up an element with the given *key* in the map referred to
+//  *		by the file descriptor *fd*, and if found, delete the element.
+//  *
+//  *		For **BPF_MAP_TYPE_QUEUE** and **BPF_MAP_TYPE_STACK** map
+//  *		types, the *flags* argument needs to be set to 0, but for other
+//  *		map types, it may be specified as:
+//  *
+//  *		**BPF_F_LOCK**
+//  *			Look up and delete the value of a spin-locked map
+//  *			without returning the lock. This must be specified if
+//  *			the elements contain a spinlock.
+//  *
+//  *		The **BPF_MAP_TYPE_QUEUE** and **BPF_MAP_TYPE_STACK** map types
+//  *		implement this command as a "pop" operation, deleting the top
+//  *		element rather than one corresponding to *key*.
+//  *		The *key* and *key_len* parameters should be zeroed when
+//  *		issuing this operation for these map types.
+//  *
+//  *		This command is only valid for the following map types:
+//  *		* **BPF_MAP_TYPE_QUEUE**
+//  *		* **BPF_MAP_TYPE_STACK**
+//  *		* **BPF_MAP_TYPE_HASH**
+//  *		* **BPF_MAP_TYPE_PERCPU_HASH**
+//  *		* **BPF_MAP_TYPE_LRU_HASH**
+//  *		* **BPF_MAP_TYPE_LRU_PERCPU_HASH**
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_MAP_FREEZE
+//  *	Description
+//  *		Freeze the permissions of the specified map.
+//  *
+//  *		Write permissions may be frozen by passing zero *flags*.
+//  *		Upon success, no future syscall invocations may alter the
+//  *		map state of *map_fd*. Write operations from eBPF programs
+//  *		are still possible for a frozen map.
+//  *
+//  *		Not supported for maps of type **BPF_MAP_TYPE_STRUCT_OPS**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_BTF_GET_NEXT_ID
+//  *	Description
+//  *		Fetch the next BPF Type Format (BTF) object currently loaded
+//  *		into the kernel.
+//  *
+//  *		Looks for the BTF object with an id greater than *start_id*
+//  *		and updates *next_id* on success. If no other BTF objects
+//  *		remain with ids higher than *start_id*, returns -1 and sets
+//  *		*errno* to **ENOENT**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, or when no id remains, -1
+//  *		is returned and *errno* is set appropriately.
+//  *
+//  * BPF_MAP_LOOKUP_BATCH
+//  *	Description
+//  *		Iterate and fetch multiple elements in a map.
+//  *
+//  *		Two opaque values are used to manage batch operations,
+//  *		*in_batch* and *out_batch*. Initially, *in_batch* must be set
+//  *		to NULL to begin the batched operation. After each subsequent
+//  *		**BPF_MAP_LOOKUP_BATCH**, the caller should pass the resultant
+//  *		*out_batch* as the *in_batch* for the next operation to
+//  *		continue iteration from the current point.
+//  *
+//  *		The *keys* and *values* are output parameters which must point
+//  *		to memory large enough to hold *count* items based on the key
+//  *		and value size of the map *map_fd*. The *keys* buffer must be
+//  *		of *key_size* * *count*. The *values* buffer must be of
+//  *		*value_size* * *count*.
+//  *
+//  *		The *elem_flags* argument may be specified as one of the
+//  *		following:
+//  *
+//  *		**BPF_F_LOCK**
+//  *			Look up the value of a spin-locked map without
+//  *			returning the lock. This must be specified if the
+//  *			elements contain a spinlock.
+//  *
+//  *		On success, *count* elements from the map are copied into the
+//  *		user buffer, with the keys copied into *keys* and the values
+//  *		copied into the corresponding indices in *values*.
+//  *
+//  *		If an error is returned and *errno* is not **EFAULT**, *count*
+//  *		is set to the number of successfully processed elements.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  *		May set *errno* to **ENOSPC** to indicate that *keys* or
+//  *		*values* is too small to dump an entire bucket during
+//  *		iteration of a hash-based map type.
+//  *
+//  * BPF_MAP_LOOKUP_AND_DELETE_BATCH
+//  *	Description
+//  *		Iterate and delete all elements in a map.
+//  *
+//  *		This operation has the same behavior as
+//  *		**BPF_MAP_LOOKUP_BATCH** with two exceptions:
+//  *
+//  *		* Every element that is successfully returned is also deleted
+//  *		  from the map. This is at least *count* elements. Note that
+//  *		  *count* is both an input and an output parameter.
+//  *		* Upon returning with *errno* set to **EFAULT**, up to
+//  *		  *count* elements may be deleted without returning the keys
+//  *		  and values of the deleted elements.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_MAP_UPDATE_BATCH
+//  *	Description
+//  *		Update multiple elements in a map by *key*.
+//  *
+//  *		The *keys* and *values* are input parameters which must point
+//  *		to memory large enough to hold *count* items based on the key
+//  *		and value size of the map *map_fd*. The *keys* buffer must be
+//  *		of *key_size* * *count*. The *values* buffer must be of
+//  *		*value_size* * *count*.
+//  *
+//  *		Each element specified in *keys* is sequentially updated to the
+//  *		value in the corresponding index in *values*. The *in_batch*
+//  *		and *out_batch* parameters are ignored and should be zeroed.
+//  *
+//  *		The *elem_flags* argument should be specified as one of the
+//  *		following:
+//  *
+//  *		**BPF_ANY**
+//  *			Create new elements or update a existing elements.
+//  *		**BPF_NOEXIST**
+//  *			Create new elements only if they do not exist.
+//  *		**BPF_EXIST**
+//  *			Update existing elements.
+//  *		**BPF_F_LOCK**
+//  *			Update spin_lock-ed map elements. This must be
+//  *			specified if the map value contains a spinlock.
+//  *
+//  *		On success, *count* elements from the map are updated.
+//  *
+//  *		If an error is returned and *errno* is not **EFAULT**, *count*
+//  *		is set to the number of successfully processed elements.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  *		May set *errno* to **EINVAL**, **EPERM**, **ENOMEM**, or
+//  *		**E2BIG**. **E2BIG** indicates that the number of elements in
+//  *		the map reached the *max_entries* limit specified at map
+//  *		creation time.
+//  *
+//  *		May set *errno* to one of the following error codes under
+//  *		specific circumstances:
+//  *
+//  *		**EEXIST**
+//  *			If *flags* specifies **BPF_NOEXIST** and the element
+//  *			with *key* already exists in the map.
+//  *		**ENOENT**
+//  *			If *flags* specifies **BPF_EXIST** and the element with
+//  *			*key* does not exist in the map.
+//  *
+//  * BPF_MAP_DELETE_BATCH
+//  *	Description
+//  *		Delete multiple elements in a map by *key*.
+//  *
+//  *		The *keys* parameter is an input parameter which must point
+//  *		to memory large enough to hold *count* items based on the key
+//  *		size of the map *map_fd*, that is, *key_size* * *count*.
+//  *
+//  *		Each element specified in *keys* is sequentially deleted. The
+//  *		*in_batch*, *out_batch*, and *values* parameters are ignored
+//  *		and should be zeroed.
+//  *
+//  *		The *elem_flags* argument may be specified as one of the
+//  *		following:
+//  *
+//  *		**BPF_F_LOCK**
+//  *			Look up the value of a spin-locked map without
+//  *			returning the lock. This must be specified if the
+//  *			elements contain a spinlock.
+//  *
+//  *		On success, *count* elements from the map are updated.
+//  *
+//  *		If an error is returned and *errno* is not **EFAULT**, *count*
+//  *		is set to the number of successfully processed elements. If
+//  *		*errno* is **EFAULT**, up to *count* elements may be been
+//  *		deleted.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_LINK_CREATE
+//  *	Description
+//  *		Attach an eBPF program to a *target_fd* at the specified
+//  *		*attach_type* hook and return a file descriptor handle for
+//  *		managing the link.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_LINK_UPDATE
+//  *	Description
+//  *		Update the eBPF program in the specified *link_fd* to
+//  *		*new_prog_fd*.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_LINK_GET_FD_BY_ID
+//  *	Description
+//  *		Open a file descriptor for the eBPF Link corresponding to
+//  *		*link_id*.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_LINK_GET_NEXT_ID
+//  *	Description
+//  *		Fetch the next eBPF link currently loaded into the kernel.
+//  *
+//  *		Looks for the eBPF link with an id greater than *start_id*
+//  *		and updates *next_id* on success. If no other eBPF links
+//  *		remain with ids higher than *start_id*, returns -1 and sets
+//  *		*errno* to **ENOENT**.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, or when no id remains, -1
+//  *		is returned and *errno* is set appropriately.
+//  *
+//  * BPF_ENABLE_STATS
+//  *	Description
+//  *		Enable eBPF runtime statistics gathering.
+//  *
+//  *		Runtime statistics gathering for the eBPF runtime is disabled
+//  *		by default to minimize the corresponding performance overhead.
+//  *		This command enables statistics globally.
+//  *
+//  *		Multiple programs may independently enable statistics.
+//  *		After gathering the desired statistics, eBPF runtime statistics
+//  *		may be disabled again by calling **close**\ (2) for the file
+//  *		descriptor returned by this function. Statistics will only be
+//  *		disabled system-wide when all outstanding file descriptors
+//  *		returned by prior calls for this subcommand are closed.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_ITER_CREATE
+//  *	Description
+//  *		Create an iterator on top of the specified *link_fd* (as
+//  *		previously created using **BPF_LINK_CREATE**) and return a
+//  *		file descriptor that can be used to trigger the iteration.
+//  *
+//  *		If the resulting file descriptor is pinned to the filesystem
+//  *		using  **BPF_OBJ_PIN**, then subsequent **read**\ (2) syscalls
+//  *		for that path will trigger the iterator to read kernel state
+//  *		using the eBPF program attached to *link_fd*.
+//  *
+//  *	Return
+//  *		A new file descriptor (a nonnegative integer), or -1 if an
+//  *		error occurred (in which case, *errno* is set appropriately).
+//  *
+//  * BPF_LINK_DETACH
+//  *	Description
+//  *		Forcefully detach the specified *link_fd* from its
+//  *		corresponding attachment point.
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * BPF_PROG_BIND_MAP
+//  *	Description
+//  *		Bind a map to the lifetime of an eBPF program.
+//  *
+//  *		The map identified by *map_fd* is bound to the program
+//  *		identified by *prog_fd* and only released when *prog_fd* is
+//  *		released. This may be used in cases where metadata should be
+//  *		associated with a program which otherwise does not contain any
+//  *		references to the map (for example, embedded in the eBPF
+//  *		program instructions).
+//  *
+//  *	Return
+//  *		Returns zero on success. On error, -1 is returned and *errno*
+//  *		is set appropriately.
+//  *
+//  * NOTES
+//  *	eBPF objects (maps and programs) can be shared between processes.
+//  *
+//  *	* After **fork**\ (2), the child inherits file descriptors
+//  *	  referring to the same eBPF objects.
+//  *	* File descriptors referring to eBPF objects can be transferred over
+//  *	  **unix**\ (7) domain sockets.
+//  *	* File descriptors referring to eBPF objects can be duplicated in the
+//  *	  usual way, using **dup**\ (2) and similar calls.
+//  *	* File descriptors referring to eBPF objects can be pinned to the
+//  *	  filesystem using the **BPF_OBJ_PIN** command of **bpf**\ (2).
+//  *
+//  *	An eBPF object is deallocated only after all file descriptors referring
+//  *	to the object have been closed and no references remain pinned to the
+//  *	filesystem or attached (for example, bound to a program or device).
+//  */
+// 
+// /* cgroup-bpf attach flags used in BPF_PROG_ATTACH command
+//  *
+//  * NONE(default): No further bpf programs allowed in the subtree.
+//  *
+//  * BPF_F_ALLOW_OVERRIDE: If a sub-cgroup installs some bpf program,
+//  * the program in this cgroup yields to sub-cgroup program.
+//  *
+//  * BPF_F_ALLOW_MULTI: If a sub-cgroup installs some bpf program,
+//  * that cgroup program gets run in addition to the program in this cgroup.
+//  *
+//  * Only one program is allowed to be attached to a cgroup with
+//  * NONE or BPF_F_ALLOW_OVERRIDE flag.
+//  * Attaching another program on top of NONE or BPF_F_ALLOW_OVERRIDE will
+//  * release old program and attach the new one. Attach flags has to match.
+//  *
+//  * Multiple programs are allowed to be attached to a cgroup with
+//  * BPF_F_ALLOW_MULTI flag. They are executed in FIFO order
+//  * (those that were attached first, run first)
+//  * The programs of sub-cgroup are executed first, then programs of
+//  * this cgroup and then programs of parent cgroup.
+//  * When children program makes decision (like picking TCP CA or sock bind)
+//  * parent program has a chance to override it.
+//  *
+//  * With BPF_F_ALLOW_MULTI a new program is added to the end of the list of
+//  * programs for a cgroup. Though it's possible to replace an old program at
+//  * any position by also specifying BPF_F_REPLACE flag and position itself in
+//  * replace_bpf_fd attribute. Old program at this position will be released.
+//  *
+//  * A cgroup with MULTI or OVERRIDE flag allows any attach flags in sub-cgroups.
+//  * A cgroup with NONE doesn't allow any programs in sub-cgroups.
+//  * Ex1:
+//  * cgrp1 (MULTI progs A, B) ->
+//  *    cgrp2 (OVERRIDE prog C) ->
+//  *      cgrp3 (MULTI prog D) ->
+//  *        cgrp4 (OVERRIDE prog E) ->
+//  *          cgrp5 (NONE prog F)
+//  * the event in cgrp5 triggers execution of F,D,A,B in that order.
+//  * if prog F is detached, the execution is E,D,A,B
+//  * if prog F and D are detached, the execution is E,A,B
+//  * if prog F, E and D are detached, the execution is C,A,B
+//  *
+//  * All eligible programs are executed regardless of return code from
+//  * earlier programs.
+//  */
+// #define BPF_F_ALLOW_OVERRIDE	(1U << 0)
+// #define BPF_F_ALLOW_MULTI	(1U << 1)
+// /* Generic attachment flags. */
+// #define BPF_F_REPLACE		(1U << 2)
+// #define BPF_F_BEFORE		(1U << 3)
+// #define BPF_F_AFTER		(1U << 4)
+// #define BPF_F_ID		(1U << 5)
+// #define BPF_F_LINK		BPF_F_LINK /* 1 << 13 */
+// 
+// /* If BPF_F_STRICT_ALIGNMENT is used in BPF_PROG_LOAD command, the
+//  * verifier will perform strict alignment checking as if the kernel
+//  * has been built with CONFIG_EFFICIENT_UNALIGNED_ACCESS not set,
+//  * and NET_IP_ALIGN defined to 2.
+//  */
+// #define BPF_F_STRICT_ALIGNMENT	(1U << 0)
+// 
+// /* If BPF_F_ANY_ALIGNMENT is used in BPF_PROG_LOAD command, the
+//  * verifier will allow any alignment whatsoever.  On platforms
+//  * with strict alignment requirements for loads ands stores (such
+//  * as sparc and mips) the verifier validates that all loads and
+//  * stores provably follow this requirement.  This flag turns that
+//  * checking and enforcement off.
+//  *
+//  * It is mostly used for testing when we want to validate the
+//  * context and memory access aspects of the verifier, but because
+//  * of an unaligned access the alignment check would trigger before
+//  * the one we are interested in.
+//  */
+// #define BPF_F_ANY_ALIGNMENT	(1U << 1)
+// 
+// /* BPF_F_TEST_RND_HI32 is used in BPF_PROG_LOAD command for testing purpose.
+//  * Verifier does sub-register def/use analysis and identifies instructions whose
+//  * def only matters for low 32-bit, high 32-bit is never referenced later
+//  * through implicit zero extension. Therefore verifier notifies JIT back-ends
+//  * that it is safe to ignore clearing high 32-bit for these instructions. This
+//  * saves some back-ends a lot of code-gen. However such optimization is not
+//  * necessary on some arches, for example x86_64, arm64 etc, whose JIT back-ends
+//  * hence hasn't used verifier's analysis result. But, we really want to have a
+//  * way to be able to verify the correctness of the described optimization on
+//  * x86_64 on which testsuites are frequently exercised.
+//  *
+//  * So, this flag is introduced. Once it is set, verifier will randomize high
+//  * 32-bit for those instructions who has been identified as safe to ignore them.
+//  * Then, if verifier is not doing correct analysis, such randomization will
+//  * regress tests to expose bugs.
+//  */
+// #define BPF_F_TEST_RND_HI32	(1U << 2)
+// 
+// /* The verifier internal test flag. Behavior is undefined */
+// #define BPF_F_TEST_STATE_FREQ	(1U << 3)
+// 
+// /* If BPF_F_SLEEPABLE is used in BPF_PROG_LOAD command, the verifier will
+//  * restrict map and helper usage for such programs. Sleepable BPF programs can
+//  * only be attached to hooks where kernel execution context allows sleeping.
+//  * Such programs are allowed to use helpers that may sleep like
+//  * bpf_copy_from_user().
+//  */
+// #define BPF_F_SLEEPABLE		(1U << 4)
+// 
+// /* If BPF_F_XDP_HAS_FRAGS is used in BPF_PROG_LOAD command, the loaded program
+//  * fully support xdp frags.
+//  */
+// #define BPF_F_XDP_HAS_FRAGS	(1U << 5)
+// 
+// /* If BPF_F_XDP_DEV_BOUND_ONLY is used in BPF_PROG_LOAD command, the loaded
+//  * program becomes device-bound but can access XDP metadata.
+//  */
+// #define BPF_F_XDP_DEV_BOUND_ONLY	(1U << 6)
+// 
+// /* The verifier internal test flag. Behavior is undefined */
+// #define BPF_F_TEST_REG_INVARIANTS	(1U << 7)
+// 
+// /* link_create.kprobe_multi.flags used in LINK_CREATE command for
+//  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.
+//  */
+// enum {
+// 	BPF_F_KPROBE_MULTI_RETURN = (1U << 0)
+// };
+// 
+// /* link_create.uprobe_multi.flags used in LINK_CREATE command for
+//  * BPF_TRACE_UPROBE_MULTI attach type to create return probe.
+//  */
+// enum {
+// 	BPF_F_UPROBE_MULTI_RETURN = (1U << 0)
+// };
+// 
+// /* link_create.netfilter.flags used in LINK_CREATE command for
+//  * BPF_PROG_TYPE_NETFILTER to enable IP packet defragmentation.
+//  */
+// #define BPF_F_NETFILTER_IP_DEFRAG (1U << 0)
+// 
+// /* When BPF ldimm64's insn[0].src_reg != 0 then this can have
+//  * the following extensions:
+//  *
+//  * insn[0].src_reg:  BPF_PSEUDO_MAP_[FD|IDX]
+//  * insn[0].imm:      map fd or fd_idx
+//  * insn[1].imm:      0
+//  * insn[0].off:      0
+//  * insn[1].off:      0
+//  * ldimm64 rewrite:  address of map
+//  * verifier type:    CONST_PTR_TO_MAP
+//  */
+const BPF_PSEUDO_MAP_FD = 1
+// #define BPF_PSEUDO_MAP_IDX	5
+// 
+// /* insn[0].src_reg:  BPF_PSEUDO_MAP_[IDX_]VALUE
+//  * insn[0].imm:      map fd or fd_idx
+//  * insn[1].imm:      offset into value
+//  * insn[0].off:      0
+//  * insn[1].off:      0
+//  * ldimm64 rewrite:  address of map[0]+offset
+//  * verifier type:    PTR_TO_MAP_VALUE
+//  */
+const BPF_PSEUDO_MAP_VALUE = 2
+// #define BPF_PSEUDO_MAP_IDX_VALUE	6
+// 
+// /* insn[0].src_reg:  BPF_PSEUDO_BTF_ID
+//  * insn[0].imm:      kernel btd id of VAR
+//  * insn[1].imm:      0
+//  * insn[0].off:      0
+//  * insn[1].off:      0
+//  * ldimm64 rewrite:  address of the kernel variable
+//  * verifier type:    PTR_TO_BTF_ID or PTR_TO_MEM, depending on whether the var
+//  *                   is struct/union.
+//  */
+// #define BPF_PSEUDO_BTF_ID	3
+// /* insn[0].src_reg:  BPF_PSEUDO_FUNC
+//  * insn[0].imm:      insn offset to the func
+//  * insn[1].imm:      0
+//  * insn[0].off:      0
+//  * insn[1].off:      0
+//  * ldimm64 rewrite:  address of the function
+//  * verifier type:    PTR_TO_FUNC.
+//  */
+// #define BPF_PSEUDO_FUNC		4
+// 
+// /* when bpf_call->src_reg == BPF_PSEUDO_CALL, bpf_call->imm == pc-relative
+//  * offset to another bpf function
+//  */
+// #define BPF_PSEUDO_CALL		1
+// /* when bpf_call->src_reg == BPF_PSEUDO_KFUNC_CALL,
+//  * bpf_call->imm == btf_id of a BTF_KIND_FUNC in the running kernel
+//  */
+// #define BPF_PSEUDO_KFUNC_CALL	2
+// 
+// /* flags for BPF_MAP_UPDATE_ELEM command */
+enum! {
+	BPF_ANY		= 0, /* create new element or update existing */
+	BPF_NOEXIST	= 1, /* create new element if it didn't exist */
+	BPF_EXIST	= 2, /* update existing element */
+	BPF_F_LOCK	= 4, /* spin_lock-ed map_lookup/map_update */
+};
+// 
+/* flags for BPF_MAP_CREATE command */
+enum! {
+	BPF_F_NO_PREALLOC	= (1 << 0),
+/* Instead of having one common LRU list in the
+ * BPF_MAP_TYPE_LRU_[PERCPU_]HASH map, use a percpu LRU list
+ * which can scale and perform better.
+ * Note, the LRU nodes (including free nodes) cannot be moved
+ * across different LRU lists.
+ */
+	BPF_F_NO_COMMON_LRU	= (1 << 1),
+/* Specify numa node during map creation */
+	BPF_F_NUMA_NODE		= (1 << 2),
+
+/* Flags for accessing BPF object from syscall side. */
+	BPF_F_RDONLY		= (1 << 3),
+	BPF_F_WRONLY		= (1 << 4),
+
+/* Flag for stack_map, store build_id+offset instead of pointer */
+	BPF_F_STACK_BUILD_ID	= (1 << 5),
+
+/* Zero-initialize hash function seed. This should only be used for testing. */
+	BPF_F_ZERO_SEED		= (1 << 6),
+
+/* Flags for accessing BPF object from program side. */
+	BPF_F_RDONLY_PROG	= (1 << 7),
+	BPF_F_WRONLY_PROG	= (1 << 8),
+
+/* Clone map from listener for newly accepted socket */
+	BPF_F_CLONE		= (1 << 9),
+
+/* Enable memory-mapping BPF map */
+	BPF_F_MMAPABLE		= (1 << 10),
+
+/* Share perf_event among processes */
+	BPF_F_PRESERVE_ELEMS	= (1 << 11),
+
+/* Create a map that is suitable to be an inner map with dynamic max entries */
+	BPF_F_INNER_MAP		= (1 << 12),
+
+/* Create a map that will be registered/unregesitered by the backed bpf_link */
+	BPF_F_LINK		= (1 << 13),
+
+/* Get path from provided FD in BPF_OBJ_PIN/BPF_OBJ_GET commands */
+	BPF_F_PATH_FD		= (1 << 14),
+};
+// 
+// /* Flags for BPF_PROG_QUERY. */
+// 
+// /* Query effective (directly attached + inherited from ancestor cgroups)
+//  * programs that will be executed for events within a cgroup.
+//  * attach_flags with this flag are always returned 0.
+//  */
+// #define BPF_F_QUERY_EFFECTIVE	(1U << 0)
+// 
+// /* Flags for BPF_PROG_TEST_RUN */
+// 
+// /* If set, run the test on the cpu specified by bpf_attr.test.cpu */
+// #define BPF_F_TEST_RUN_ON_CPU	(1U << 0)
+// /* If set, XDP frames will be transmitted after processing */
+// #define BPF_F_TEST_XDP_LIVE_FRAMES	(1U << 1)
+// 
+// /* type for BPF_ENABLE_STATS */
+// enum bpf_stats_type {
+// 	/* enabled run_time_ns and run_cnt */
+// 	BPF_STATS_RUN_TIME = 0,
+// };
+// 
+// enum bpf_stack_build_id_status {
+// 	/* user space need an empty entry to identify end of a trace */
+// 	BPF_STACK_BUILD_ID_EMPTY = 0,
+// 	/* with valid build_id and offset */
+// 	BPF_STACK_BUILD_ID_VALID = 1,
+// 	/* couldn't get build_id, fallback to ip */
+// 	BPF_STACK_BUILD_ID_IP = 2,
+// };
+// 
+// #define BPF_BUILD_ID_SIZE 20
+// struct bpf_stack_build_id {
+// 	__s32		status;
+// 	unsigned char	build_id[BPF_BUILD_ID_SIZE];
+// 	union {
+// 		__u64	offset;
+// 		__u64	ip;
+// 	};
+// };
+// 
+
+const BPF_OBJ_NAME_LEN = 16
+
+C! pub struct bpf_attr_map_create { /* anonymous struct used by BPF_MAP_CREATE command */
+    __u32	map_type;	/* one of enum bpf_map_type */
+    __u32	key_size;	/* size of key in bytes */
+    __u32	value_size;	/* size of value in bytes */
+    __u32	max_entries;	/* max number of entries in a map */
+    __u32	map_flags;	/* BPF_MAP_CREATE related
+                             * flags defined above.
+                             */
+    __u32	inner_map_fd;	/* fd pointing to the inner map */
+    __u32	numa_node;	/* numa node (effective only if
+                             * BPF_F_NUMA_NODE is set).
+                             */
+    char	map_name[BPF_OBJ_NAME_LEN];
+    __u32	map_ifindex;	/* ifindex of netdev to create on */
+    __u32	btf_fd;		/* fd pointing to a BTF type data */
+    __u32	btf_key_type_id;	/* BTF type_id of the key */
+    __u32	btf_value_type_id;	/* BTF type_id of the value */
+    __u32	btf_vmlinux_value_type_id;/* BTF type_id of a kernel-
+                                       * struct stored as the
+                                       * map value
+                                       */
+    /* Any per-map-type extra fields
+     *
+     * BPF_MAP_TYPE_BLOOM_FILTER - the lowest 4 bits indicate the
+     * number of hash functions (if 0, the bloom filter will default
+     * to using 5 hash functions).
+     */
+    __u64	map_extra;
+};
+
+C! pub struct bpf_attr_map_elem { /* anonymous struct used by BPF_MAP_*_ELEM commands */
+    __u32		map_fd;
+    __aligned_u64	key;
+    __aligned_u64       value;
+    __u64		flags;
+};
+
+C! struct bpf_attr_map_batch { /* struct used by BPF_MAP_*_BATCH commands */
+    __aligned_u64	in_batch;	/* start batch,
+                                     * NULL to start from beginning
+                                     */
+    __aligned_u64	out_batch;	/* output: next start batch */
+    __aligned_u64	keys;
+    __aligned_u64	values;
+    __u32		count;		/* input/output:
+                                     * input: # of key/value
+                                     * elements
+                                     * output: # of filled elements
+                                     */
+    __u32		map_fd;
+    __u64		elem_flags;
+    __u64		flags;
+};
+
+C! pub struct bpf_attr_prog_load { /* anonymous struct used by BPF_PROG_LOAD command */
+    __u32		prog_type;	/* one of enum bpf_prog_type */
+    __u32		insn_cnt;
+    __aligned_u64	insns;
+    __aligned_u64	license;
+    __u32		log_level;	/* verbosity level of verifier */
+    __u32		log_size;	/* size of user buffer */
+    __aligned_u64	log_buf;	/* user supplied buffer */
+    __u32		kern_version;	/* not used */
+    __u32		prog_flags;
+    char		prog_name[BPF_OBJ_NAME_LEN];
+    __u32		prog_ifindex;	/* ifindex of netdev to prep for */
+    /* For some prog types expected attach type must be known at
+     * load time to verify attach type specific parts of prog
+     * (context accesses, allowed helpers, etc).
+     */
+    __u32		expected_attach_type;
+    __u32		prog_btf_fd;	/* fd pointing to BTF type data */
+    __u32		func_info_rec_size;	/* userspace bpf_func_info size */
+    __aligned_u64	func_info;	/* func info */
+    __u32		func_info_cnt;	/* number of bpf_func_info records */
+    __u32		line_info_rec_size;	/* userspace bpf_line_info size */
+    __aligned_u64	line_info;	/* line info */
+    __u32		line_info_cnt;	/* number of bpf_line_info records */
+    __u32		attach_btf_id;	/* in-kernel BTF type id to attach to */
+    union {
+            /* valid prog_fd to attach to bpf prog */
+            __u32		attach_prog_fd;
+            /* or valid module BTF object fd or 0 to attach to vmlinux */
+            __u32		attach_btf_obj_fd;
+    };
+    __u32		core_relo_cnt;	/* number of bpf_core_relo */
+    __aligned_u64	fd_array;	/* array of FDs */
+    __aligned_u64	core_relos;
+    __u32		core_relo_rec_size; /* sizeof(struct bpf_core_relo) */
+    /* output: actual total log contents size (including termintaing zero).
+     * It could be both larger than original log_size (if log was
+     * truncated), or smaller (if log buffer wasn't filled completely).
+     */
+    __u32		log_true_size;
+};
+
+C! struct bpf_attr_obj { /* anonymous struct used by BPF_OBJ_* commands */
+    __aligned_u64	pathname;
+    __u32		bpf_fd;
+    __u32		file_flags;
+    /* Same as dirfd in openat() syscall; see openat(2)
+     * manpage for details of path FD and pathname semantics;
+     * path_fd should accompanied by BPF_F_PATH_FD flag set in
+     * file_flags field, otherwise it should be set to zero;
+     * if BPF_F_PATH_FD flag is not set, AT_FDCWD is assumed.
+     */
+    __s32		path_fd;
+};
+
+C! struct bpf_attr_prog_attach { /* anonymous struct used by BPF_PROG_ATTACH/DETACH commands */
+    union {
+            __u32	target_fd;	/* target object to attach to or ... */
+            __u32	target_ifindex;	/* target ifindex */
+    };
+    __u32		attach_bpf_fd;
+    __u32		attach_type;
+    __u32		attach_flags;
+    __u32		replace_bpf_fd;
+    union {
+            __u32	relative_fd;
+            __u32	relative_id;
+    };
+    __u64		expected_revision;
+};
+
+C! pub struct bpf_attr_prog_test_run { /* anonymous struct used by BPF_PROG_TEST_RUN command */
+    __u32		prog_fd;
+    __u32		retval;
+    __u32		data_size_in;	/* input: len of data_in */
+    __u32		data_size_out;	/* input/output: len of data_out
+                                     *   returns ENOSPC if data_out
+                                     *   is too small.
+                                     */
+    __aligned_u64	data_in;
+    __aligned_u64	data_out;
+    __u32		repeat;
+    __u32		duration;
+    __u32		ctx_size_in;	/* input: len of ctx_in */
+    __u32		ctx_size_out;	/* input/output: len of ctx_out
+                                     *   returns ENOSPC if ctx_out
+                                     *   is too small.
+                                     */
+    __aligned_u64	ctx_in;
+    __aligned_u64	ctx_out;
+    __u32		flags;
+    __u32		cpu;
+    __u32		batch_size;
+};
+
+C! struct bpf_attr_get_id { /* anonymous struct used by BPF_*_GET_*_ID */
+    union {
+            __u32		start_id;
+            __u32		prog_id;
+            __u32		map_id;
+            __u32		btf_id;
+            __u32		link_id;
+    };
+    __u32		next_id;
+    __u32		open_flags;
+};
+
+C! struct bpf_attr_obj_get_info_by_fd { /* anonymous struct used by BPF_OBJ_GET_INFO_BY_FD */
+    __u32		bpf_fd;
+    __u32		info_len;
+    __aligned_u64	info;
+};
+
+C! struct bpf_attr_prog_query { /* anonymous struct used by BPF_PROG_QUERY command */
+    union {
+            __u32	target_fd;	/* target object to query or ... */
+            __u32	target_ifindex;	/* target ifindex */
+    };
+    __u32		attach_type;
+    __u32		query_flags;
+    __u32		attach_flags;
+    __aligned_u64	prog_ids;
+    union {
+            __u32	prog_cnt;
+            __u32	count;
+    };
+    __u32		__pad0;
+    /* output: per-program attach_flags.
+     * not allowed to be set during effective query.
+     */
+    __aligned_u64	prog_attach_flags;
+    __aligned_u64	link_ids;
+    __aligned_u64	link_attach_flags;
+    __u64		revision;
+};
+
+C! struct bpf_attr_raw_tracepoint_open { /* anonymous struct used by BPF_RAW_TRACEPOINT_OPEN command */
+    __u64 name;
+    __u32 prog_fd;
+};
+
+C! struct bpf_attr_btf_load { /* anonymous struct for BPF_BTF_LOAD */
+    __aligned_u64	btf;
+    __aligned_u64	btf_log_buf;
+    __u32		btf_size;
+    __u32		btf_log_size;
+    __u32		btf_log_level;
+    /* output: actual total log contents size (including termintaing zero).
+     * It could be both larger than original log_size (if log was
+     * truncated), or smaller (if log buffer wasn't filled completely).
+     */
+    __u32		btf_log_true_size;
+};
+
+C! struct bpf_attr_task_fd_query { /* struct used by BPF_TASK_FD_QUERY command */
+    __u32		pid;		/* input: pid */
+    __u32		fd;		/* input: fd */
+    __u32		flags;		/* input: flags */
+    __u32		buf_len;	/* input/output: buf len */
+    __aligned_u64	buf;		/* input/output:
+                                     *   tp_name for tracepoint
+                                     *   symbol for kprobe
+                                     *   filename for uprobe
+                                     */
+    __u32		prog_id;	/* output: prod_id */
+    __u32		fd_type;	/* output: BPF_FD_TYPE_* */
+    __u64		probe_offset;	/* output: probe_offset */
+    __u64		probe_addr;	/* output: probe_addr */
+};
+
+C! struct bpf_attr_link_create { /* struct used by BPF_LINK_CREATE command */
+    union {
+            __u32		prog_fd;	/* eBPF program to attach */
+            __u32		map_fd;		/* struct_ops to attach */
+    };
+    union {
+            __u32	target_fd;	/* target object to attach to or ... */
+            __u32	target_ifindex; /* target ifindex */
+    };
+    __u32		attach_type;	/* attach type */
+    __u32		flags;		/* extra flags */
+    union {
+            __u32	target_btf_id;	/* btf_id of target to attach to */
+            struct {
+                    __aligned_u64	iter_info;	/* extra bpf_iter_link_info */
+                    __u32		iter_info_len;	/* iter_info length */
+            };
+            struct {
+                    /* black box user-provided value passed through
+                     * to BPF program at the execution time and
+                     * accessible through bpf_get_attach_cookie() BPF helper
+                     */
+                    __u64		bpf_cookie;
+            } perf_event;
+            struct {
+                    __u32		flags;
+                    __u32		cnt;
+                    __aligned_u64	syms;
+                    __aligned_u64	addrs;
+                    __aligned_u64	cookies;
+            } kprobe_multi;
+            struct {
+                    /* this is overlaid with the target_btf_id above. */
+                    __u32		target_btf_id;
+                    /* black box user-provided value passed through
+                     * to BPF program at the execution time and
+                     * accessible through bpf_get_attach_cookie() BPF helper
+                     */
+                    __u64		cookie;
+            } tracing;
+            struct {
+                    __u32		pf;
+                    __u32		hooknum;
+                    __s32		priority;
+                    __u32		flags;
+            } netfilter;
+            struct {
+                    __u32 relative_fd;
+                    __u64 expected_revision;
+            } tcx;
+            struct {
+                    __aligned_u64	path;
+                    __aligned_u64	offsets;
+                    __aligned_u64	ref_ctr_offsets;
+                    __aligned_u64	cookies;
+                    __u32		cnt;
+                    __u32		flags;
+                    __u32		pid;
+            } uprobe_multi;
+            struct {
+                    __u32	relative_fd;
+                    __u64	expected_revision;
+            } netkit;
+    };
+};
+
+C! struct bpf_attr_link_update { /* struct used by BPF_LINK_UPDATE command */
+    __u32		link_fd;	/* link fd */
+    union {
+            /* new program fd to update link with */
+            __u32		new_prog_fd;
+            /* new struct_ops map fd to update link with */
+            __u32           new_map_fd;
+    };
+    __u32		flags;		/* extra flags */
+    union {
+            /* expected link's program fd; is specified only if
+             * BPF_F_REPLACE flag is set in flags.
+             */
+            __u32		old_prog_fd;
+            /* expected link's map fd; is specified only
+             * if BPF_F_REPLACE flag is set.
+             */
+            __u32           old_map_fd;
+    };
+};
+
+C! struct bpf_attr_link_detach { /* struct used by BPF_LINK_DETACH command */
+    __u32   link_fd;
+};
+
+C! struct bpf_attr_enable_stats { /* struct used by BPF_ENABLE_STATS command */
+    __u32   type;
+};
+
+C! struct bpf_attr_iter_create { /* struct used by BPF_ITER_CREATE command */
+    __u32		link_fd;
+    __u32		flags;
+};
+
+C! pub struct bpf_attr_prog_bind_map { /* struct used by BPF_PROG_BIND_MAP command */
+    __u32   prog_fd;
+    __u32   map_fd;
+    __u32   flags;		/* extra flags */
+};
+
+enum! {
+    BPF_REG_0 = 0,
+    BPF_REG_1,
+    BPF_REG_2,
+    BPF_REG_3,
+    BPF_REG_4,
+    BPF_REG_5,
+    BPF_REG_6,
+    BPF_REG_7,
+    BPF_REG_8,
+    BPF_REG_9,
+    BPF_REG_10,
+    BPF_REG_FP = BPF_REG_10,
+    BPF_REG_SP = BPF_REG_9,
+}
+
+enum! {
+	BPF_MAP_CREATE,
+	BPF_MAP_LOOKUP_ELEM,
+	BPF_MAP_UPDATE_ELEM,
+	BPF_MAP_DELETE_ELEM,
+	BPF_MAP_GET_NEXT_KEY,
+	BPF_PROG_LOAD,
+	BPF_OBJ_PIN,
+	BPF_OBJ_GET,
+	BPF_PROG_ATTACH,
+	BPF_PROG_DETACH,
+	BPF_PROG_TEST_RUN,
+	BPF_PROG_RUN = BPF_PROG_TEST_RUN,
+	BPF_PROG_GET_NEXT_ID,
+	BPF_MAP_GET_NEXT_ID,
+	BPF_PROG_GET_FD_BY_ID,
+	BPF_MAP_GET_FD_BY_ID,
+	BPF_OBJ_GET_INFO_BY_FD,
+	BPF_PROG_QUERY,
+	BPF_RAW_TRACEPOINT_OPEN,
+	BPF_BTF_LOAD,
+	BPF_BTF_GET_FD_BY_ID,
+	BPF_TASK_FD_QUERY,
+	BPF_MAP_LOOKUP_AND_DELETE_ELEM,
+	BPF_MAP_FREEZE,
+	BPF_BTF_GET_NEXT_ID,
+	BPF_MAP_LOOKUP_BATCH,
+	BPF_MAP_LOOKUP_AND_DELETE_BATCH,
+	BPF_MAP_UPDATE_BATCH,
+	BPF_MAP_DELETE_BATCH,
+	BPF_LINK_CREATE,
+	BPF_LINK_UPDATE,
+	BPF_LINK_GET_FD_BY_ID,
+	BPF_LINK_GET_NEXT_ID,
+	BPF_ENABLE_STATS,
+	BPF_ITER_CREATE,
+	BPF_LINK_DETACH,
+	BPF_PROG_BIND_MAP,
+};
+
+enum! {
+	BPF_MAP_TYPE_UNSPEC,
+	BPF_MAP_TYPE_HASH,
+	BPF_MAP_TYPE_ARRAY,
+	BPF_MAP_TYPE_PROG_ARRAY,
+	BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+	BPF_MAP_TYPE_PERCPU_HASH,
+	BPF_MAP_TYPE_PERCPU_ARRAY,
+	BPF_MAP_TYPE_STACK_TRACE,
+	BPF_MAP_TYPE_CGROUP_ARRAY,
+	BPF_MAP_TYPE_LRU_HASH,
+	BPF_MAP_TYPE_LRU_PERCPU_HASH,
+	BPF_MAP_TYPE_LPM_TRIE,
+	BPF_MAP_TYPE_ARRAY_OF_MAPS,
+	BPF_MAP_TYPE_HASH_OF_MAPS,
+	BPF_MAP_TYPE_DEVMAP,
+	BPF_MAP_TYPE_SOCKMAP,
+	BPF_MAP_TYPE_CPUMAP,
+	BPF_MAP_TYPE_XSKMAP,
+	BPF_MAP_TYPE_SOCKHASH,
+	BPF_MAP_TYPE_CGROUP_STORAGE_DEPRECATED,
+	/* BPF_MAP_TYPE_CGROUP_STORAGE is available to bpf programs attaching
+	 * to a cgroup. The newer BPF_MAP_TYPE_CGRP_STORAGE is available to
+	 * both cgroup-attached and other progs and supports all functionality
+	 * provided by BPF_MAP_TYPE_CGROUP_STORAGE. So mark
+	 * BPF_MAP_TYPE_CGROUP_STORAGE deprecated.
+	 */
+	BPF_MAP_TYPE_CGROUP_STORAGE = BPF_MAP_TYPE_CGROUP_STORAGE_DEPRECATED,
+	BPF_MAP_TYPE_REUSEPORT_SOCKARRAY,
+	BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE_DEPRECATED,
+	/* BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE is available to bpf programs
+	 * attaching to a cgroup. The new mechanism (BPF_MAP_TYPE_CGRP_STORAGE +
+	 * local percpu kptr) supports all BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE
+	 * functionality and more. So mark * BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE
+	 * deprecated.
+	 */
+	BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE = BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE_DEPRECATED,
+	BPF_MAP_TYPE_QUEUE,
+	BPF_MAP_TYPE_STACK,
+	BPF_MAP_TYPE_SK_STORAGE,
+	BPF_MAP_TYPE_DEVMAP_HASH,
+	BPF_MAP_TYPE_STRUCT_OPS,
+	BPF_MAP_TYPE_RINGBUF,
+	BPF_MAP_TYPE_INODE_STORAGE,
+	BPF_MAP_TYPE_TASK_STORAGE,
+	BPF_MAP_TYPE_BLOOM_FILTER,
+	BPF_MAP_TYPE_USER_RINGBUF,
+	BPF_MAP_TYPE_CGRP_STORAGE,
+};
+
+/* Note that tracing related programs such as
+ * BPF_PROG_TYPE_{KPROBE,TRACEPOINT,PERF_EVENT,RAW_TRACEPOINT}
+ * are not subject to a stable API since kernel internal data
+ * structures can change from release to release and may
+ * therefore break existing tracing BPF programs. Tracing BPF
+ * programs correspond to /a/ specific kernel which is to be
+ * analyzed, and not /a/ specific kernel /and/ all future ones.
+ */
+enum! {
+	BPF_PROG_TYPE_UNSPEC,
+	BPF_PROG_TYPE_SOCKET_FILTER,
+	BPF_PROG_TYPE_KPROBE,
+	BPF_PROG_TYPE_SCHED_CLS,
+	BPF_PROG_TYPE_SCHED_ACT,
+	BPF_PROG_TYPE_TRACEPOINT,
+	BPF_PROG_TYPE_XDP,
+	BPF_PROG_TYPE_PERF_EVENT,
+	BPF_PROG_TYPE_CGROUP_SKB,
+	BPF_PROG_TYPE_CGROUP_SOCK,
+	BPF_PROG_TYPE_LWT_IN,
+	BPF_PROG_TYPE_LWT_OUT,
+	BPF_PROG_TYPE_LWT_XMIT,
+	BPF_PROG_TYPE_SOCK_OPS,
+	BPF_PROG_TYPE_SK_SKB,
+	BPF_PROG_TYPE_CGROUP_DEVICE,
+	BPF_PROG_TYPE_SK_MSG,
+	BPF_PROG_TYPE_RAW_TRACEPOINT,
+	BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+	BPF_PROG_TYPE_LWT_SEG6LOCAL,
+	BPF_PROG_TYPE_LIRC_MODE2,
+	BPF_PROG_TYPE_SK_REUSEPORT,
+	BPF_PROG_TYPE_FLOW_DISSECTOR,
+	BPF_PROG_TYPE_CGROUP_SYSCTL,
+	BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE,
+	BPF_PROG_TYPE_CGROUP_SOCKOPT,
+	BPF_PROG_TYPE_TRACING,
+	BPF_PROG_TYPE_STRUCT_OPS,
+	BPF_PROG_TYPE_EXT,
+	BPF_PROG_TYPE_LSM,
+	BPF_PROG_TYPE_SK_LOOKUP,
+	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
+	BPF_PROG_TYPE_NETFILTER,
+};
+
+enum! {
+	BPF_CGROUP_INET_INGRESS,
+	BPF_CGROUP_INET_EGRESS,
+	BPF_CGROUP_INET_SOCK_CREATE,
+	BPF_CGROUP_SOCK_OPS,
+	BPF_SK_SKB_STREAM_PARSER,
+	BPF_SK_SKB_STREAM_VERDICT,
+	BPF_CGROUP_DEVICE,
+	BPF_SK_MSG_VERDICT,
+	BPF_CGROUP_INET4_BIND,
+	BPF_CGROUP_INET6_BIND,
+	BPF_CGROUP_INET4_CONNECT,
+	BPF_CGROUP_INET6_CONNECT,
+	BPF_CGROUP_INET4_POST_BIND,
+	BPF_CGROUP_INET6_POST_BIND,
+	BPF_CGROUP_UDP4_SENDMSG,
+	BPF_CGROUP_UDP6_SENDMSG,
+	BPF_LIRC_MODE2,
+	BPF_FLOW_DISSECTOR,
+	BPF_CGROUP_SYSCTL,
+	BPF_CGROUP_UDP4_RECVMSG,
+	BPF_CGROUP_UDP6_RECVMSG,
+	BPF_CGROUP_GETSOCKOPT,
+	BPF_CGROUP_SETSOCKOPT,
+	BPF_TRACE_RAW_TP,
+	BPF_TRACE_FENTRY,
+	BPF_TRACE_FEXIT,
+	BPF_MODIFY_RETURN,
+	BPF_LSM_MAC,
+	BPF_TRACE_ITER,
+	BPF_CGROUP_INET4_GETPEERNAME,
+	BPF_CGROUP_INET6_GETPEERNAME,
+	BPF_CGROUP_INET4_GETSOCKNAME,
+	BPF_CGROUP_INET6_GETSOCKNAME,
+	BPF_XDP_DEVMAP,
+	BPF_CGROUP_INET_SOCK_RELEASE,
+	BPF_XDP_CPUMAP,
+	BPF_SK_LOOKUP,
+	BPF_XDP,
+	BPF_SK_SKB_VERDICT,
+	BPF_SK_REUSEPORT_SELECT,
+	BPF_SK_REUSEPORT_SELECT_OR_MIGRATE,
+	BPF_PERF_EVENT,
+	BPF_TRACE_KPROBE_MULTI,
+	BPF_LSM_CGROUP,
+	BPF_STRUCT_OPS,
+	BPF_NETFILTER,
+	BPF_TCX_INGRESS,
+	BPF_TCX_EGRESS,
+	BPF_TRACE_UPROBE_MULTI,
+	BPF_CGROUP_UNIX_CONNECT,
+	BPF_CGROUP_UNIX_SENDMSG,
+	BPF_CGROUP_UNIX_RECVMSG,
+	BPF_CGROUP_UNIX_GETPEERNAME,
+	BPF_CGROUP_UNIX_GETSOCKNAME,
+	BPF_NETKIT_PRIMARY,
+	BPF_NETKIT_PEER,
+	MAX_BPF_ATTACH_TYPE
+};
+
+enum! {
+	BPF_LINK_TYPE_UNSPEC = 0,
+	BPF_LINK_TYPE_RAW_TRACEPOINT = 1,
+	BPF_LINK_TYPE_TRACING = 2,
+	BPF_LINK_TYPE_CGROUP = 3,
+	BPF_LINK_TYPE_ITER = 4,
+	BPF_LINK_TYPE_NETNS = 5,
+	BPF_LINK_TYPE_XDP = 6,
+	BPF_LINK_TYPE_PERF_EVENT = 7,
+	BPF_LINK_TYPE_KPROBE_MULTI = 8,
+	BPF_LINK_TYPE_STRUCT_OPS = 9,
+	BPF_LINK_TYPE_NETFILTER = 10,
+	BPF_LINK_TYPE_TCX = 11,
+	BPF_LINK_TYPE_UPROBE_MULTI = 12,
+	BPF_LINK_TYPE_NETKIT = 13,
+	MAX_BPF_LINK_TYPE,
+};
+
+enum! {
+	BPF_PERF_EVENT_UNSPEC = 0,
+	BPF_PERF_EVENT_UPROBE = 1,
+	BPF_PERF_EVENT_URETPROBE = 2,
+	BPF_PERF_EVENT_KPROBE = 3,
+	BPF_PERF_EVENT_KRETPROBE = 4,
+	BPF_PERF_EVENT_TRACEPOINT = 5,
+	BPF_PERF_EVENT_EVENT = 6,
+};
+
+
+
+// instruction classes
+pub const BPF_LD   = 0x00
+pub const BPF_LDX  = 0x01
+pub const BPF_ST   = 0x02
+pub const BPF_STX  = 0x03
+pub const BPF_ALU  = 0x04
+pub const BPF_JMP  = 0x05
+pub const BPF_RET  = 0x06
+pub const BPF_MISC = 0x07
+
+
+// ld/ldx size
+pub const BPF_W  = 0x00
+pub const BPF_H  = 0x08
+pub const BPF_B  = 0x10
+pub const BPF_DW = 0x18
+
+
+// ld/ldx modes
+pub const BPF_IMM = 0x00
+pub const BPF_ABS = 0x20
+pub const BPF_IND = 0x40
+pub const BPF_MEM = 0x60
+pub const BPF_LEN = 0x80
+pub const BPF_MSH = 0xa0
+
+
+// alu/jmp opcodes
+pub const BPF_ADD = 0x00
+pub const BPF_SUB = 0x10
+pub const BPF_MUL = 0x20
+pub const BPF_DIV = 0x30
+pub const BPF_OR  = 0x40
+pub const BPF_AND = 0x50
+pub const BPF_LSH = 0x60
+pub const BPF_RSH = 0x70
+pub const BPF_NEG = 0x80
+pub const BPF_MOD = 0x90
+pub const BPF_XOR = 0xa0
+
+
+// jmp opcodes
+pub const BPF_JA   = 0x00
+pub const BPF_JEQ  = 0x10
+pub const BPF_JGT  = 0x20
+pub const BPF_JGE  = 0x30
+pub const BPF_JSET = 0x40
+
+
+// source operand
+pub const BPF_K = 0x00 // immediate
+pub const BPF_X = 0x08 // register
+
+
+// instruction classes
+pub const BPF_JMP32 = 0x06
+pub const BPF_ALU64 = 0x07
+
+
+// ld/ldx fields
+pub const BPF_DW = 0x18
+pub const BPF_MEMSX = 0x80
+pub const BPF_ATOMIC = 0xc0
+pub const BPF_XADD = 0xc0
+
+
+// alu/jmp fields
+pub const BPF_MOV = 0xb0
+pub const BPF_ARSH = 0xc0
+
+
+// change endianness of a register
+pub const BPF_END = 0xd0
+pub const BPF_TO_LE = 0x00
+pub const BPF_TO_BE = 0x08
+pub const BPF_FROM_LE = BPF_TO_LE
+pub const BPF_FROM_BE = BPF_TO_BE
+
+
+// jmp encodings
+pub const BPF_JNE = 0x50
+pub const BPF_JLT = 0xa0
+pub const BPF_JLE = 0xb0
+pub const BPF_JSGT = 0x60
+pub const BPF_JSGE = 0x70
+pub const BPF_JSLT = 0xc0
+pub const BPF_JSLE = 0xd0
+pub const BPF_CALL = 0x80
+pub const BPF_EXIT = 0x90
+
+
+// atomic op type fields (stored in immediate)
+pub const BPF_FETCH = 0x01
+pub const BPF_XCHG = (0xe0 | BPF_FETCH)
+pub const BPF_CMPXCHG = (0xf0 | BPF_FETCH)
+
+// max instructions
+pub const BPF_MAXINSNS = 4096
+
+pub ns helper {
+    pub const unspec = 0
+    pub const map_lookup_elem = 1
+    pub const map_update_elem = 2
+    pub const map_delete_elem = 3
+    pub const probe_read = 4
+    pub const ktime_get_ns = 5
+    pub const trace_printk = 6
+    pub const get_prandom_u32 = 7
+    pub const get_smp_processor_id = 8
+    pub const skb_store_bytes = 9
+    pub const l3_csum_replace = 10
+    pub const l4_csum_replace = 11
+    pub const tail_call = 12
+    pub const clone_redirect = 13
+    pub const get_current_pid_tgid = 14
+    pub const get_current_uid_gid = 15
+    pub const get_current_comm = 16
+    pub const get_cgroup_classid = 17
+    pub const skb_vlan_push = 18
+    pub const skb_vlan_pop = 19
+    pub const skb_get_tunnel_key = 20
+    pub const skb_set_tunnel_key = 21
+    pub const perf_event_read = 22
+    pub const redirect = 23
+    pub const get_route_realm = 24
+    pub const perf_event_output = 25
+    pub const skb_load_bytes = 26
+    pub const get_stackid = 27
+    pub const csum_diff = 28
+    pub const skb_get_tunnel_opt = 29
+    pub const skb_set_tunnel_opt = 30
+    pub const skb_change_proto = 31
+    pub const skb_change_type = 32
+    pub const skb_under_cgroup = 33
+    pub const get_hash_recalc = 34
+    pub const get_current_task = 35
+    pub const probe_write_user = 36
+    pub const current_task_under_cgroup = 37
+    pub const skb_change_tail = 38
+    pub const skb_pull_data = 39
+    pub const csum_update = 40
+    pub const set_hash_invalid = 41
+    pub const get_numa_node_id = 42
+    pub const skb_change_head = 43
+    pub const xdp_adjust_head = 44
+    pub const probe_read_str = 45
+    pub const get_socket_cookie = 46
+    pub const get_socket_uid = 47
+    pub const set_hash = 48
+    pub const setsockopt = 49
+    pub const skb_adjust_room = 50
+    pub const redirect_map = 51
+    pub const sk_redirect_map = 52
+    pub const sock_map_update = 53
+    pub const xdp_adjust_meta = 54
+    pub const perf_event_read_value = 55
+    pub const perf_prog_read_value = 56
+    pub const getsockopt = 57
+    pub const override_return = 58
+    pub const sock_ops_cb_flags_set = 59
+    pub const msg_redirect_map = 60
+    pub const msg_apply_bytes = 61
+    pub const msg_cork_bytes = 62
+    pub const msg_pull_data = 63
+    pub const bind = 64
+    pub const xdp_adjust_tail = 65
+    pub const skb_get_xfrm_state = 66
+    pub const get_stack = 67
+    pub const skb_load_bytes_relative = 68
+    pub const fib_lookup = 69
+    pub const sock_hash_update = 70
+    pub const msg_redirect_hash = 71
+    pub const sk_redirect_hash = 72
+    pub const lwt_push_encap = 73
+    pub const lwt_seg6_store_bytes = 74
+    pub const lwt_seg6_adjust_srh = 75
+    pub const lwt_seg6_action = 76
+    pub const rc_repeat = 77
+    pub const rc_keydown = 78
+    pub const skb_cgroup_id = 79
+    pub const get_current_cgroup_id = 80
+    pub const get_local_storage = 81
+    pub const sk_select_reuseport = 82
+    pub const skb_ancestor_cgroup_id = 83
+    pub const sk_lookup_tcp = 84
+    pub const sk_lookup_udp = 85
+    pub const sk_release = 86
+    pub const map_push_elem = 87
+    pub const map_pop_elem = 88
+    pub const map_peek_elem = 89
+    pub const msg_push_data = 90
+    pub const msg_pop_data = 91
+    pub const rc_pointer_rel = 92
+    pub const spin_lock = 93
+    pub const spin_unlock = 94
+    pub const sk_fullsock = 95
+    pub const tcp_sock = 96
+    pub const skb_ecn_set_ce = 97
+    pub const get_listener_sock = 98
+    pub const skc_lookup_tcp = 99
+    pub const tcp_check_syncookie = 100
+    pub const sysctl_get_name = 101
+    pub const sysctl_get_current_value = 102
+    pub const sysctl_get_new_value = 103
+    pub const sysctl_set_new_value = 104
+    pub const strtol = 105
+    pub const strtoul = 106
+    pub const sk_storage_get = 107
+    pub const sk_storage_delete = 108
+    pub const send_signal = 109
+    pub const tcp_gen_syncookie = 110
+    pub const skb_output = 111
+    pub const probe_read_user = 112
+    pub const probe_read_kernel = 113
+    pub const probe_read_user_str = 114
+    pub const probe_read_kernel_str = 115
+    pub const tcp_send_ack = 116
+    pub const send_signal_thread = 117
+    pub const jiffies64 = 118
+    pub const read_branch_records = 119
+    pub const get_ns_current_pid_tgid = 120
+    pub const xdp_output = 121
+    pub const get_netns_cookie = 122
+    pub const get_current_ancestor_cgroup_id = 123
+    pub const sk_assign = 124
+    pub const ktime_get_boot_ns = 125
+    pub const seq_printf = 126
+    pub const seq_write = 127
+    pub const sk_cgroup_id = 128
+    pub const sk_ancestor_cgroup_id = 129
+    pub const ringbuf_output = 130
+    pub const ringbuf_reserve = 131
+    pub const ringbuf_submit = 132
+    pub const ringbuf_discard = 133
+    pub const ringbuf_query = 134
+    pub const csum_level = 135
+    pub const skc_to_tcp6_sock = 136
+    pub const skc_to_tcp_sock = 137
+    pub const skc_to_tcp_timewait_sock = 138
+    pub const skc_to_tcp_request_sock = 139
+    pub const skc_to_udp6_sock = 140
+    pub const get_task_stack = 141
+    pub const load_hdr_opt = 142
+    pub const store_hdr_opt = 143
+    pub const reserve_hdr_opt = 144
+    pub const inode_storage_get = 145
+    pub const inode_storage_delete = 146
+    pub const d_path = 147
+    pub const copy_from_user = 148
+    pub const snprintf_btf = 149
+    pub const seq_printf_btf = 150
+    pub const skb_cgroup_classid = 151
+    pub const redirect_neigh = 152
+    pub const per_cpu_ptr = 153
+    pub const this_cpu_ptr = 154
+    pub const redirect_peer = 155
+    pub const task_storage_get = 156
+    pub const task_storage_delete = 157
+    pub const get_current_task_btf = 158
+    pub const bprm_opts_set = 159
+    pub const ktime_get_coarse_ns = 160
+    pub const ima_inode_hash = 161
+    pub const sock_from_file = 162
+    pub const check_mtu = 163
+    pub const for_each_map_elem = 164
+    pub const snprintf = 165
+    pub const sys_bpf = 166
+    pub const btf_find_by_name_kind = 167
+    pub const sys_close = 168
+    pub const timer_init = 169
+    pub const timer_set_callback = 170
+    pub const timer_start = 171
+    pub const timer_cancel = 172
+    pub const get_func_ip = 173
+    pub const get_attach_cookie = 174
+    pub const task_pt_regs = 175
+    pub const get_branch_snapshot = 176
+    pub const trace_vprintk = 177
+    pub const skc_to_unix_sock = 178
+    pub const kallsyms_lookup_name = 179
+    pub const find_vma = 180
+    pub const loop = 181
+    pub const strncmp = 182
+    pub const get_func_arg = 183
+    pub const get_func_ret = 184
+    pub const get_func_arg_cnt = 185
+    pub const get_retval = 186
+    pub const set_retval = 187
+    pub const xdp_get_buff_len = 188
+    pub const xdp_load_bytes = 189
+    pub const xdp_store_bytes = 190
+    pub const copy_from_user_task = 191
+    pub const skb_set_tstamp = 192
+    pub const ima_file_hash = 193
+    pub const kptr_xchg = 194
+    pub const map_lookup_percpu_elem = 195
+    pub const skc_to_mptcp_sock = 196
+    pub const dynptr_from_mem = 197
+    pub const ringbuf_reserve_dynptr = 198
+    pub const ringbuf_submit_dynptr = 199
+    pub const ringbuf_discard_dynptr = 200
+    pub const dynptr_read = 201
+    pub const dynptr_write = 202
+    pub const dynptr_data = 203
+    pub const tcp_raw_gen_syncookie_ipv4 = 204
+    pub const tcp_raw_gen_syncookie_ipv6 = 205
+    pub const tcp_raw_check_syncookie_ipv4 = 206
+    pub const tcp_raw_check_syncookie_ipv6 = 207
+    pub const ktime_get_tai_ns = 208
+    pub const user_ringbuf_drain = 209
+    pub const cgrp_storage_get = 210
+    pub const cgrp_storage_delete = 211
+
+    pub const names = [
+        'unspec',
+        'map_lookup_elem',
+        'map_update_elem',
+        'map_delete_elem',
+        'probe_read',
+        'ktime_get_ns',
+        'trace_printk',
+        'get_prandom_u32',
+        'get_smp_processor_id',
+        'skb_store_bytes',
+        'l3_csum_replace',
+        'l4_csum_replace',
+        'tail_call',
+        'clone_redirect',
+        'get_current_pid_tgid',
+        'get_current_uid_gid',
+        'get_current_comm',
+        'get_cgroup_classid',
+        'skb_vlan_push',
+        'skb_vlan_pop',
+        'skb_get_tunnel_key',
+        'skb_set_tunnel_key',
+        'perf_event_read',
+        'redirect',
+        'get_route_realm',
+        'perf_event_output',
+        'skb_load_bytes',
+        'get_stackid',
+        'csum_diff',
+        'skb_get_tunnel_opt',
+        'skb_set_tunnel_opt',
+        'skb_change_proto',
+        'skb_change_type',
+        'skb_under_cgroup',
+        'get_hash_recalc',
+        'get_current_task',
+        'probe_write_user',
+        'current_task_under_cgroup',
+        'skb_change_tail',
+        'skb_pull_data',
+        'csum_update',
+        'set_hash_invalid',
+        'get_numa_node_id',
+        'skb_change_head',
+        'xdp_adjust_head',
+        'probe_read_str',
+        'get_socket_cookie',
+        'get_socket_uid',
+        'set_hash',
+        'setsockopt',
+        'skb_adjust_room',
+        'redirect_map',
+        'sk_redirect_map',
+        'sock_map_update',
+        'xdp_adjust_meta',
+        'perf_event_read_value',
+        'perf_prog_read_value',
+        'getsockopt',
+        'override_return',
+        'sock_ops_cb_flags_set',
+        'msg_redirect_map',
+        'msg_apply_bytes',
+        'msg_cork_bytes',
+        'msg_pull_data',
+        'bind',
+        'xdp_adjust_tail',
+        'skb_get_xfrm_state',
+        'get_stack',
+        'skb_load_bytes_relative',
+        'fib_lookup',
+        'sock_hash_update',
+        'msg_redirect_hash',
+        'sk_redirect_hash',
+        'lwt_push_encap',
+        'lwt_seg6_store_bytes',
+        'lwt_seg6_adjust_srh',
+        'lwt_seg6_action',
+        'rc_repeat',
+        'rc_keydown',
+        'skb_cgroup_id',
+        'get_current_cgroup_id',
+        'get_local_storage',
+        'sk_select_reuseport',
+        'skb_ancestor_cgroup_id',
+        'sk_lookup_tcp',
+        'sk_lookup_udp',
+        'sk_release',
+        'map_push_elem',
+        'map_pop_elem',
+        'map_peek_elem',
+        'msg_push_data',
+        'msg_pop_data',
+        'rc_pointer_rel',
+        'spin_lock',
+        'spin_unlock',
+        'sk_fullsock',
+        'tcp_sock',
+        'skb_ecn_set_ce',
+        'get_listener_sock',
+        'skc_lookup_tcp',
+        'tcp_check_syncookie',
+        'sysctl_get_name',
+        'sysctl_get_current_value',
+        'sysctl_get_new_value',
+        'sysctl_set_new_value',
+        'strtol',
+        'strtoul',
+        'sk_storage_get',
+        'sk_storage_delete',
+        'send_signal',
+        'tcp_gen_syncookie',
+        'skb_output',
+        'probe_read_user',
+        'probe_read_kernel',
+        'probe_read_user_str',
+        'probe_read_kernel_str',
+        'tcp_send_ack',
+        'send_signal_thread',
+        'jiffies64',
+        'read_branch_records',
+        'get_ns_current_pid_tgid',
+        'xdp_output',
+        'get_netns_cookie',
+        'get_current_ancestor_cgroup_id',
+        'sk_assign',
+        'ktime_get_boot_ns',
+        'seq_printf',
+        'seq_write',
+        'sk_cgroup_id',
+        'sk_ancestor_cgroup_id',
+        'ringbuf_output',
+        'ringbuf_reserve',
+        'ringbuf_submit',
+        'ringbuf_discard',
+        'ringbuf_query',
+        'csum_level',
+        'skc_to_tcp6_sock',
+        'skc_to_tcp_sock',
+        'skc_to_tcp_timewait_sock',
+        'skc_to_tcp_request_sock',
+        'skc_to_udp6_sock',
+        'get_task_stack',
+        'load_hdr_opt',
+        'store_hdr_opt',
+        'reserve_hdr_opt',
+        'inode_storage_get',
+        'inode_storage_delete',
+        'd_path',
+        'copy_from_user',
+        'snprintf_btf',
+        'seq_printf_btf',
+        'skb_cgroup_classid',
+        'redirect_neigh',
+        'per_cpu_ptr',
+        'this_cpu_ptr',
+        'redirect_peer',
+        'task_storage_get',
+        'task_storage_delete',
+        'get_current_task_btf',
+        'bprm_opts_set',
+        'ktime_get_coarse_ns',
+        'ima_inode_hash',
+        'sock_from_file',
+        'check_mtu',
+        'for_each_map_elem',
+        'snprintf',
+        'sys_bpf',
+        'btf_find_by_name_kind',
+        'sys_close',
+        'timer_init',
+        'timer_set_callback',
+        'timer_start',
+        'timer_cancel',
+        'get_func_ip',
+        'get_attach_cookie',
+        'task_pt_regs',
+        'get_branch_snapshot',
+        'trace_vprintk',
+        'skc_to_unix_sock',
+        'kallsyms_lookup_name',
+        'find_vma',
+        'loop',
+        'strncmp',
+        'get_func_arg',
+        'get_func_ret',
+        'get_func_arg_cnt',
+        'get_retval',
+        'set_retval',
+        'xdp_get_buff_len',
+        'xdp_load_bytes',
+        'xdp_store_bytes',
+        'copy_from_user_task',
+        'skb_set_tstamp',
+        'ima_file_hash',
+        'kptr_xchg',
+        'map_lookup_percpu_elem',
+        'skc_to_mptcp_sock',
+        'dynptr_from_mem',
+        'ringbuf_reserve_dynptr',
+        'ringbuf_submit_dynptr',
+        'ringbuf_discard_dynptr',
+        'dynptr_read',
+        'dynptr_write',
+        'dynptr_data',
+        'tcp_raw_gen_syncookie_ipv4',
+        'tcp_raw_gen_syncookie_ipv6',
+        'tcp_raw_check_syncookie_ipv4',
+        'tcp_raw_check_syncookie_ipv6',
+        'ktime_get_tai_ns',
+        'user_ringbuf_drain',
+        'cgrp_storage_get',
+        'cgrp_storage_delete'
+    ]
+}
+
+
+C! fn {
+    void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+}
+
+pub fn bpf(cmd: Int, attr: _) -> Int {
+    c.syscall(321, (c.int, cmd), (c.ptr, attr.__ptr__()), (c.ulong, #attr))
+}

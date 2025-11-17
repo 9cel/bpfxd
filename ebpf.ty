@@ -1,0 +1,2471 @@
+import bpf (..)
+import ffi as c (C!)
+import ptr
+import os (..)
+import atomic
+import ty
+import time
+import chalk (chalk)
+
+const PER_CPU_SCRATCH = (256 * 1024)
+
+// Distinct colors for registers in disassembly
+chalk.r0  = '#e45d44'
+chalk.r1  = '#44e48a'
+chalk.r2  = '#66a8e4'
+chalk.r3  = '#3466e4'
+chalk.r4  = '#a8e445'
+chalk.r5  = '#66d19a'
+chalk.r6  = '#bb66e4'
+chalk.r7  = '#86c6d1'
+chalk.r8  = '#cc66d1'
+chalk.r9  = '#d86666'
+chalk.r10 = '#d1d166'
+
+chalk.jmp    = '#a8e445'
+chalk.call   = '#cc66d1'
+chalk.exit   = '#66d19a'
+
+chalk.ld_map_value = '#a466d1'
+chalk.ld_map_fd    = '#a466d1'
+
+const SYS_perf_event_open = 298
+
+const PAGE_SIZE = 4096
+
+const PERF_TYPE_TRACEPOINT   = 2
+const PERF_EVENT_IOC_ENABLE  = 0x2400
+const PERF_EVENT_IOC_DISABLE = 0x2401
+const PERF_EVENT_IOC_SET_BPF = 0x40042408
+
+const r0  = BPF_REG_0
+const r1  = BPF_REG_1
+const r2  = BPF_REG_2
+const r3  = BPF_REG_3
+const r4  = BPF_REG_4
+const r5  = BPF_REG_5
+const r6  = BPF_REG_6
+const r7  = BPF_REG_7
+const r8  = BPF_REG_8
+const r9  = BPF_REG_9
+const rbp = BPF_REG_10
+
+C! struct perf_event_attr {
+    __u32 type;
+    __u32 size;
+    __u64 config;
+    __u64 sample_period_or_freq;
+    __u64 sample_type;
+    __u64 read_format;
+    __u64 flags;
+    __u32 wakeup_events_or_watermark;
+    __u32 bp_type;
+    __u64 bp_addr_or_config1;
+    __u64 bp_len_or_config2;
+    __u64 branch_sample_type;
+    __u64 sample_regs_user;
+    __u32 sample_stack_user;
+    __s32 clockid;
+    __u64 sample_regs_intr;
+    __u32 aux_watermark;
+    __u16 sample_max_stack;
+    __u16 __reserved_2;
+};
+
+use CType = {
+    ?ident: String | nil,
+    ?name: String | nil,
+    ?const?: Bool,
+    ?volatile?: Bool,
+    ?restrict?: Bool,
+    ?pointee: CType | nil,
+    ?count: Int | nil
+}
+
+fn parse(field: String) -> CType {
+    const token = /(\s+|\*|\[\d*\]|struct \w+)/
+    const qualifiers = ['const', 'volatile', 'restrict']
+
+    let parts = field.scan(/\*|struct \w+|unsigned \w+|\w+/).reverse()
+
+    fn get-qualifiers(
+        const?: Bool = false,
+        volatile?: Bool = false,
+        restrict?: Bool = false
+    ) -> (Bool, Bool, Bool) {
+        while (#parts > 0) && (parts[-1] in qualifiers) {
+            match parts.pop() {
+                'const'    => { const?    = true }
+                'volatile' => { volatile? = true }
+                'restrict' => { restrict? = true }
+            }
+        }
+        (const?, volatile?, restrict?)
+    }
+
+    let (const?, volatile?, restrict?) = get-qualifiers()
+
+    let name = parts.pop()
+    while (#parts > 1) && (parts[-1] not in qualifiers) && (parts[-1] != '*') {
+        let part = parts.pop()
+        name = "{part} {name}"
+    }
+
+    (const?, volatile?, restrict?) = get-qualifiers(const?, volatile?, restrict?)
+
+    fn go(t0: CType) -> CType {
+        if #parts == 0 {
+            return t0
+        }
+
+        let (const?, volatile?, restrict?) = get-qualifiers()
+
+        match parts.pop() {
+            '*'   => { return {*go({*t0, pointee: t0, name: '*'}), const?, volatile?, restrict?} },
+            ident => { return {*t0, ident} }
+        }
+    }
+
+    go({name, const?, volatile?, restrict?})
+}
+
+class Moment {
+    __t: Float
+
+    init(t: Float | Int) {
+        __t = float(t ?? time.now())
+    }
+
+    __fmt__(fmt: String) -> String {
+        time.strftime(fmt, int(__t))
+    }
+
+    __str__() -> String {
+        __fmt__("%Y-%m-%d %H:%M:%S")
+    }
+}
+
+class BpfJump {
+    __prog:     BpfAssembler
+    __byte-off: Int
+    __insn-off: Int
+    __id:       Int
+
+    init(prog: BpfAssembler, byte-off: Int, insn-off: Int, id: Int) {
+        __prog     = prog
+        __byte-off = byte-off
+        __insn-off = insn-off
+        __id       = id
+    }
+
+    patch() {
+        __prog.patch-jump(__byte-off, __insn-off, __id)
+    }
+}
+
+class BpfAssembler {
+    __count: Int
+    __prog:  Blob
+    __dis:   Blob
+    __label: Int
+
+    init() {
+        __count = 0
+        __prog  = Blob()
+        __dis   = Blob()
+        __label = 0
+    }
+
+    __ptr__() -> Ptr[_] {
+        __prog.ptr()
+    }
+
+    #() -> Int {
+        __count
+    }
+
+    __emit(code: Int, dst: Int, src: Int, off: Int, imm: Int, imm2: Int = 0) {
+        __prog.push(code)
+        
+        __prog.push(
+            ((dst & 0x0F) << 0)
+          | ((src & 0x0F) << 4)
+        )
+
+        __prog.push((off >> 0) & 0xFF)
+        __prog.push((off >> 8) & 0xFF)
+
+        __prog.push((imm >> 0) & 0xFF)
+        __prog.push((imm >> 8) & 0xFF)
+        __prog.push((imm >> 16) & 0xFF)
+        __prog.push((imm >> 24) & 0xFF)
+
+        if code == 0x18 {
+            __prog.push(0)
+            __prog.push(0)
+            __prog.push(0)
+            __prog.push(0)
+            __prog.push((imm2 >> 0) & 0xFF)
+            __prog.push((imm2 >> 8) & 0xFF)
+            __prog.push((imm2 >> 16) & 0xFF)
+            __prog.push((imm2 >> 24) & 0xFF)
+            __count += 1
+        }
+
+        __count += 1
+    }
+
+    __d(text: String) {
+        let parts = text.scan(/^\w+|if|r\d+|map\d+|L\d+|i\d+|u\d+|-?\d+|./)
+        let parts = parts.map(p -> match p {
+            /r(\d+)/      => chalk"[{p}]{p}[/]",
+            /map(\d+)/    => chalk"[{p}?]{p}[/]",
+            /L(\d+)/      => chalk"[{p}?]{p}[/]",
+            /^-?\d+$/     => chalk"[magenta]{p}[/]",
+            /^(i|u)\d+$/  => chalk"[cyan]{p}[/]",
+            'if'          => chalk"[#888888]{p}[/]",
+            /^.$/         => p,
+            _             => chalk"[{p}]{p}[/]",
+        })
+        __dis.push("  {#self:04}  {parts.str()}\n")
+    }
+
+    ld64(dst: Int, imm: Int) {
+        __d("r{dst} = {imm}")
+        __emit(BPF_LD | BPF_IMM | BPF_DW, dst, 0, 0, imm)
+    }
+
+    ld_map_fd(dst: Int, fd: Int) {
+        __d("r{dst} = map{fd}")
+        __emit(BPF_LD | BPF_IMM | BPF_DW, dst, BPF_PSEUDO_MAP_FD, 0, fd)
+    }
+
+    ld_map_value(dst: Int, fd: Int, off: Int) {
+        __d("r{dst} = *(map{fd}[0]{off:+})")
+        __emit(BPF_LD | BPF_IMM | BPF_DW, dst, BPF_PSEUDO_MAP_VALUE, 0, fd, off)
+    }
+
+    imov64(dst: Int, imm: Int) {
+        __d("r{dst} = {imm}")
+        __emit(BPF_ALU64 | BPF_MOV | BPF_K, dst, 0, 0, imm)
+    }
+
+    mov64(dst: Int, src: Int) {
+        __d("r{dst} = r{src}")
+        __emit(BPF_ALU64 | BPF_MOV | BPF_X, dst, src, 0, 0)
+    }
+
+    mov32(dst: Int, src: Int) {
+        __d("r{dst} = (u32)r{src}")
+        __emit(BPF_ALU | BPF_MOV | BPF_X, dst, src, 0, 0)
+    }
+
+    mov16(dst: Int, src: Int) {
+        __d("r{dst} = (u16)r{src}")
+        __emit(BPF_ALU | BPF_MOV | BPF_X, dst, src, 0, 0)
+    }
+
+    mov8(dst: Int, src: Int) {
+        __d("r{dst} = (u8)r{src}")
+        __emit(BPF_ALU | BPF_MOV | BPF_X, dst, src, 0, 0)
+    }
+
+    add64(dst: Int, src: Int) {
+        __d("r{dst} += r{src}")
+        __emit(BPF_ALU64 | BPF_ADD | BPF_X, dst, src, 0, 0)
+    }
+
+    add64i(dst: Int, imm: Int) {
+        __d("r{dst} += {imm}")
+        __emit(BPF_ALU64 | BPF_ADD | BPF_K, dst, 0, 0, imm)
+    }
+
+    mul64(dst: Int, src: Int) {
+        __d("r{dst} *= r{src}")
+        __emit(BPF_ALU64 | BPF_MUL | BPF_X, dst, src, 0, 0)
+    }
+
+    imul64i(dst: Int, imm: Int) {
+        __d("r{dst} *= {imm}")
+        __emit(BPF_ALU64 | BPF_MUL | BPF_K, dst, 0, 0, imm)
+    }
+
+    sub64(dst: Int, src: Int) {
+        __d("r{dst} -= r{src}")
+        __emit(BPF_ALU64 | BPF_SUB | BPF_X, dst, src, 0, 0)
+    }
+
+    sub64i(dst: Int, imm: Int) {
+        __d("r{dst} -= {imm}")
+        __emit(BPF_ALU64 | BPF_SUB | BPF_K, dst, 0, 0, imm)
+    }
+    
+    div64(dst: Int, src: Int) {
+        __d("r{dst} /= r{src}")
+        __emit(BPF_ALU64 | BPF_DIV | BPF_X, dst, src, 0, 0)
+    }
+
+    and64i(dst: Int, imm: Int) {
+        __d("r{dst} &= {imm}")
+        __emit(BPF_ALU64 | BPF_AND | BPF_K, dst, 0, 0, imm)
+    }
+
+    or64(dst: Int, src: Int) {
+        __d("r{dst} |= r{src}")
+        __emit(BPF_ALU64 | BPF_OR | BPF_X, dst, src, 0, 0)
+    }
+
+    shr64i(dst: Int, imm: Int) {
+        __d("r{dst} >>= {imm}")
+        __emit(BPF_ALU64 | BPF_RSH | BPF_K, dst, 0, 0, imm)
+    }
+
+    shl64i(dst: Int, imm: Int) {
+        __d("r{dst} <<= {imm}")
+        __emit(BPF_ALU64 | BPF_LSH | BPF_K, dst, 0, 0, imm)
+    }
+
+    exit() {
+        __d("exit")
+        __emit(BPF_JMP | BPF_EXIT, 0, 0, 0, 0)
+    }
+
+    label() -> (Int, Int) {
+        __dis.push(str(chalk"[L{__label}?]L{__label}[/]:\n"))
+        (#self, __label++)
+    }
+
+    __jmp(op: Int, dst: Int, src: Int, off: Int, imm: Int) {
+        __emit(BPF_JMP | op, dst, src, off, imm)
+        BpfJump(self, #__prog - 8, #self - 1, __label++)
+    }
+
+    jmp64(imm: Int = 0, to=nil) -> BpfJump {
+        match to {
+            (pos, id) => {
+                __d("jmp L{id}")
+                __emit(BPF_JMP | BPF_JA, 0, 0, pos - #self - 1, 0)
+            },
+
+            _ => {
+                __d("jmp L{__label}")
+                __jmp(BPF_JA, 0, 0, imm, 0)
+            }
+        }
+    }
+
+    jeq64(dst: Int, imm: Int = 0) -> BpfJump {
+        __d("jmp L{__label} if r{dst} == {imm}")
+        __jmp(BPF_JEQ | BPF_K, dst, 0, 0, imm)
+    }
+
+    jeq64x(dst: Int, src: Int) -> BpfJump {
+        __d("jmp L{__label} if r{dst} == r{src}")
+        __jmp(BPF_JEQ | BPF_X, dst, src, 0, 0)
+    }
+
+    jne64(dst: Int, imm: Int = 0) -> BpfJump {
+        __d("jmp L{__label} if r{dst} != {imm}")
+        __jmp(BPF_JNE | BPF_K, dst, 0, 0, imm)
+    }
+
+    jgt64(dst: Int, imm: Int = 0) -> BpfJump {
+        __d("jmp L{__label} if r{dst} > {imm}")
+        __jmp(BPF_JGT | BPF_K, dst, 0, 0, imm)
+    }
+
+    jle64(dst: Int, imm: Int = 0) -> BpfJump {
+        __d("jmp L{__label} if r{dst} <= {imm}")
+        __jmp(BPF_JLE | BPF_K, dst, 0, 0, imm)
+    }
+
+    jle64x(dst: Int, src: Int) -> BpfJump {
+        __d("jmp L{__label} if r{dst} <= r{src}")
+        __jmp(BPF_JLE | BPF_X, dst, src, 0, 0)
+    }
+
+    jne64x(dst: Int, src: Int) -> BpfJump {
+        __d("jmp L{__label} if r{dst} != r{src}")
+        __jmp(BPF_JNE | BPF_X, dst, src, 0, 0)
+    }
+
+    sti8(dst: Int, imm: Int, off: Int = 0) {
+        __d("*(u8 *)(r{dst}{off:+}) = {imm}")
+        __emit(BPF_ST | BPF_MEM | BPF_B, dst, 0, off, imm)
+    }
+
+    stx8(dst: Int, src: Int, off: Int = 0) {
+        __d("stx8 [r{dst}+{off}], r{src}")
+        __emit(BPF_STX | BPF_MEM | BPF_B, dst, src, off, 0)
+    }
+
+    stx16(dst: Int, src: Int, off: Int = 0) {
+        __d("*(u16 *)(r{dst}{off:+}) = r{src}")
+        __emit(BPF_STX | BPF_MEM | BPF_H, dst, src, off, 0)
+    }
+
+    stx32(dst: Int, src: Int, off: Int = 0) {
+        __d("*(u32 *)(r{dst}{off:+}) = r{src}")
+        __emit(BPF_STX | BPF_MEM | BPF_W, dst, src, off, 0)
+    }
+
+    stx64(dst: Int, src: Int, off: Int = 0) {
+        if off % 8 != 0 {
+            throw RuntimeError("stx64: offset must be multiple of 8")
+        }
+        __d("*(u64 *)(r{dst}{off:+}) = r{src}")
+        __emit(BPF_STX | BPF_MEM | BPF_DW, dst, src, off, 0)
+    }
+
+    ldx8(dst: Int, src: Int, off: Int = 0) {
+        __d("r{dst} = *(u8 *)(r{src}+{off})")
+        __emit(BPF_LDX | BPF_MEM | BPF_B, dst, src, off, 0)
+    }
+
+    ldx16(dst: Int, src: Int, off: Int = 0) {
+        __d("r{dst} = *(u16 *)(r{src}{off:+})")
+        __emit(BPF_LDX | BPF_MEM | BPF_H, dst, src, off, 0)
+    }
+
+    ldx32(dst: Int, src: Int, off: Int = 0) {
+        __d("r{dst} = *(u32 *)(r{src}{off:+})")
+        __emit(BPF_LDX | BPF_MEM | BPF_W, dst, src, off, 0)
+    }
+
+    ldx64(dst: Int, src: Int, off: Int = 0) {
+        __d("r{dst} = *(u64 *)(r{src}{off:+})")
+        __emit(BPF_LDX | BPF_MEM | BPF_DW, dst, src, off, 0)
+    }
+
+    patch-jump(byte-off: Int, insn-off: Int, id: Int) {
+        let offset = #self - insn-off - 1
+        let ptr = __prog.ptr() + byte-off + 2
+        c.store(c.u16, ptr, offset)
+        __dis.push(str(chalk"[L{id}?]L{id}[/]:\n"))
+    }
+
+    call(func: Int) {
+        __d("call {helper.names[func]}")
+        __emit(BPF_JMP | BPF_CALL, 0, 0, 0, func)
+    }
+
+    note(text: _) {
+        __dis.push(str(chalk"[#555555]// {text}[/]\n"))
+    }
+
+    dis -> String {
+        __dis.str()
+    }
+
+    hex -> String {
+        __prog.list().map(\"{_:02x}").groups-of(8).map(&unwords).unlines()
+    }
+}
+
+tag UnknownPtr, MapPtr, KernelPtr, UserPtr, StackPtr;
+tag U8, U16, U32, U64;
+tag I8, I16, I32, I64;
+tag Str;
+tag Time64;
+tag Struct;
+tag Record;
+tag RingBuffer;
+tag Hash;
+tag UnknownType;
+tag Unit;
+tag Const;
+
+macro AnyMap = RingBuffer or Hash(_, _)
+macro AnyPtr(t) = UnknownPtr($$t) or MapPtr($$t) or KernelPtr($$t) or UserPtr($$t) or StackPtr($$t, _)
+macro AnyInt = U8 or U16 or U32 or U64 or I8 or I16 or I32 or I64 or Const(_)
+
+use BpfType = 
+    UnknownPtr[BpfType]
+  | MapPtr[BpfType]
+  | KernelPtr[BpfType]
+  | UserPtr[BpfType]
+  | StackPtr[(BpfType, Int)]
+  | RingBuffer
+  | Hash[(Int, BpfType)]
+  | U8
+  | U16
+  | U32
+  | U64
+  | I8
+  | I16
+  | I32
+  | I64
+  | Time64
+  | Const[Int]
+  | Record[Array[BpfType]]
+  | Struct[Dict[String, (Int, BpfType)]]
+  | Str[Int]
+  | Unit
+  | nil
+
+fn signed?(t: BpfType) -> Bool {
+    match t {
+        I8, I16, I32, I64 => true,
+        _                 => false
+    }
+}
+
+fn align(n: Int) -> Int {
+    (n & 7) ? ((n + 8) & ~7) : n
+}
+
+pub fn size-of(t: BpfType) -> Int {
+    match t {
+        U8 or I8    => 1,
+        U16 or I16  => 2,
+        U32 or I32  => 4,
+        U64 or I64  => 8,
+        Time64      => 8,
+        AnyPtr(_)   => 8,
+        Const(_)    => 0,
+        Str(n)      => n,
+        Record(ts)  => ts.map(align . size-of).sum(),
+        Unit        => 0
+    }
+}
+
+let c-type-map = %{
+    'unsigned char': U8,
+    'unsigned short': U16,
+    'unsigned int': U32,
+    'unsigned long': U64,
+    'char': I8,
+    'short': I16,
+    'int': I32,
+    'long': I64,
+
+    'size_t': U64,
+    'ssize_t': I64,
+
+    'off_t': I64,
+    'pid_t': I32,
+
+    'umode_t': U32
+}
+
+fn c-to-bpf(t: CType) -> BpfType {
+    match t {
+        {pointee: $t, *} => UserPtr(c-to-bpf(t)),
+
+        {name, *} => {
+            if let $bpf-type = c-type-map[name] {
+                bpf-type
+            } else {
+                throw RuntimeError("unsupported C type name: {name}")
+            }
+        },
+
+        _ => throw RuntimeError("unsupported C type: {t}")
+    }
+}
+
+fn ty-to-bpf(t: AST) -> BpfType {
+    match t {
+        ty.Id({name, *}) => {
+            match name {
+                'u8'      => U8,
+                'u16'     => U16,
+                'u32'     => U32,
+                'u64'     => U64,
+                'i8'      => I8,
+                'i16'     => I16,
+                'i32'     => I32,
+                'i64'     => I64,
+                'size_t'  => U64,
+                'ssize_t' => I64,
+                'pid_t'   => I32,
+                'str'     => UnknownPtr(I8),
+                _         => throw RuntimeError("unsupported type: {name}")
+            }
+        },
+
+        ty.Array([ty.ArrayItem({item, *})]) => {
+            UnknownPtr(ty-to-bpf(item))
+        },
+
+        _ => throw RuntimeError("unsupported type: {t}")
+    }
+}
+
+class Var : Slot {
+    __off:  Int
+    __name: String
+    __prog: BpfProgram
+    type:   BpfType
+    map:    _
+
+    init(name: String, off: Int, prog: BpfProgram) {
+        dbg("new var: {name} @ {off}")
+        __name = name
+        __off  = off
+        __prog = prog
+    }
+
+    off -> Int {
+        __off
+    }
+
+    name -> String {
+        __name
+    }
+
+    map? -> Bool {
+        match type {
+            AnyMap => true,
+            _      => false
+        }
+    }
+
+    local? -> Bool {
+        (map == nil)
+    }
+
+    load(dst: Int) {
+        match type {
+            U8  or I8  => __prog.asm.ldx8(dst, rbp, -__off),
+            U16 or I16 => __prog.asm.ldx16(dst, rbp, -__off),
+            U32 or I32 => __prog.asm.ldx32(dst, rbp, -__off),
+            _          => __prog.asm.ldx64(dst, rbp, -__off)
+        }
+    }
+
+    store(src: Int) {
+        match type {
+            U8  or I8  => __prog.asm.stx8(rbp, src, -__off),
+            U16 or I16 => __prog.asm.stx16(rbp, src, -__off),
+            U32 or I32 => __prog.asm.stx32(rbp, src, -__off),
+            _          => __prog.asm.stx64(rbp, src, -__off)
+        }
+    }
+
+    load-addr(dst: Int) {
+        __prog.asm.mov64(dst, rbp)
+        __prog.asm.add64i(dst, -__off)
+    }
+
+    spill() -> Slot {
+        self
+    }
+}
+
+use Expr = {
+    ast: AST
+    type: BpfType
+}
+
+trait Slot {
+    load(dst: Int) -> _;
+    load-addr(dst: Int) -> _;
+    store(src: Int) -> _;
+    spill() -> Slot;
+}
+
+class RegZeroSlot : Slot {
+    __prog: BpfProgram
+
+    init(prog: BpfProgram) {
+        __prog = prog
+    }
+
+    load(dst: Int) {
+        if dst != r0 {
+            __prog.asm.mov64(dst, r0)
+        }
+    }
+
+    store(src: Int) {
+        if src != r0 {
+            __prog.asm.mov64(r0, src)
+        }
+    }
+
+    spill() -> Slot {
+        let slot = __prog.alloc(8)
+        slot.store(r0)
+        slot
+    }
+
+    load-addr(dst: Int) {
+        spill().load-addr(dst)
+    }
+}
+
+class StackSlot : Slot {
+    __off:   Int
+    __size:  Int
+    __alloc: StackAllocator
+    __asm:   BpfAssembler
+    __live:  Bool
+
+    init(
+        off:   Int,
+        size:  Int,
+        alloc: StackAllocator,
+        asm:   BpfAssembler
+    ) {
+        __off   = off
+        __size  = size
+        __alloc = alloc
+        __asm   = asm
+        __live  = true
+    }
+
+    off -> Int {
+        __off
+    }
+
+    size -> Int {
+        __size
+    }
+
+    load(dst: Int) {
+        match __size {
+            1 => __asm.ldx8(dst, rbp, -__off),
+            2 => __asm.ldx16(dst, rbp, -__off),
+            4 => __asm.ldx32(dst, rbp, -__off),
+            8 => __asm.ldx64(dst, rbp, -__off),
+            _ => throw RuntimeError("unsupported stack slot size: {__size}")
+        }
+    }
+
+    store(src: Int) {
+        match __size {
+            1 => __asm.stx8(rbp, src, -__off),
+            2 => __asm.stx16(rbp, src, -__off),
+            4 => __asm.stx32(rbp, src, -__off),
+            8 => __asm.stx64(rbp, src, -__off),
+            _ => throw RuntimeError("unsupported stack slot size: {__size}")
+        }
+    }
+
+    load-addr(dst: Int) {
+        __asm.mov64(dst, rbp)
+        __asm.add64i(dst, -__off)
+    }
+
+    spill() -> Slot {
+        self
+    }
+
+    __drop__() {
+        if __live {
+            __live = false
+            __alloc.free(self)
+        }
+    }
+}
+
+class StackAllocator {
+    __off:  Int
+    __free: Array[(Int, Int)]
+    __asm:  BpfAssembler
+
+    init(off: Int = 0, asm: BpfAssembler) {
+        __off  = off
+        __free = []
+        __asm  = asm
+    }
+
+    alloc(size: Int = 8) -> StackSlot {
+        for i in ..#__free {
+            let (off, sz) = __free[i]
+            if sz >= size {
+                __free.pop(i)
+                if sz > size {
+                    __free.push((off + size, sz - size))
+                }
+                return StackSlot(off, size, self, __asm)
+            }
+        }
+
+        __off += size
+
+        StackSlot(__off, size, self, __asm)
+    }
+
+    free(slot: StackSlot) {
+        __free.push((slot.off, slot.size))
+    }
+}
+
+pub class BpfProgram {
+    __context:      BpfContext
+    __tracing:      Array[TracepointHandle]
+    __ast:          AST
+    __asm:          BpfAssembler
+    __fd:           Int
+    __env:          Dict[String, Var]
+    __maps:         Dict[String, Var]
+    __var-off:      Int
+    __fmts:         Array[Array[String | {type: BpfType | nil, fmt: String | nil}]]
+    __strings:      Dict[String, Int]
+    __scratch:      Var
+    __output:       Var
+    __loop-depth:   Int
+    __stack-alloc:  StackAllocator
+
+    strings { __fmts }
+
+    init(ast: AST, context: BpfContext) {
+        __context = context
+        __ast = ast
+        __asm = BpfAssembler()
+        __fd = -1
+        __tracing = []
+        __env = %{}
+        __loop-depth = 0
+        __var-off = 16
+        __fmts = []
+        __strings = %{}
+
+        __scratch = __var('__scratch')
+        __scratch.type = UnknownPtr(U8)
+        __scratch.map = map.Array(1, os.ncpu() * PER_CPU_SCRATCH)
+
+        ringbuf('__output')
+        __output = __var('__output')
+
+        __var('__dynptr', size=16)
+        __var('cpu').type = U32
+
+        __string('%s')
+    }
+
+    alloc(size: Int = 8) -> StackSlot {
+        __stack-alloc.alloc(size)
+    }
+
+    __string(s: String) -> Int {
+        if let $fd = __strings[s] {
+            return fd
+        }
+
+        let attr = bpf_attr_map_create(
+            map_type=BPF_MAP_TYPE_ARRAY,
+            key_size=4,
+            value_size=64,
+            max_entries=1,
+            map_flags=BPF_F_RDONLY_PROG
+        )
+
+        let fd = bpf(BPF_MAP_CREATE, attr)
+        if fd < 0 {
+            throw OSError('bpf(BPF_MAP_CREATE)')
+        }
+
+        let zero = c.new(c.u32)
+        zero[0] = 0
+
+        let attr = bpf_attr_map_elem(
+            map_fd=fd,
+            key=zero,
+            value=c.c_str(s),
+            flags=BPF_ANY
+        )
+
+        let ret = bpf(BPF_MAP_UPDATE_ELEM, attr)
+        if ret < 0 {
+            throw OSError('bpf(BPF_MAP_UPDATE_ELEM)')
+        }
+
+        attr = bpf_attr_map_elem(map_fd=fd)
+        ret = bpf(BPF_MAP_FREEZE, attr)
+        if ret < 0 {
+            throw OSError('bpf(BPF_MAP_FREEZE)')
+        }
+
+        __strings[s] = fd
+    }
+
+    __get-string(s: String, reg: Int = r0) {
+        let fd = __string(s)
+        __asm.ld_map_value(reg, fd, 0)
+    }
+
+    __var(name: String, size: Int = 8) -> Var {
+        if let $var = __env[name] {
+            var
+        } else {
+            __var-off += size
+
+            let var = __env[name] = Var(name, __var-off, self)
+
+            if name.starts?('g_') {
+                var.type = U64
+                var.map  = __context.array(name)
+            } else if name.starts?('t_') {
+                var.type = U64
+                var.map  = __context.per-cpu-array(name)
+            }
+
+            var
+        }
+    }
+
+    __offset(name: String) -> Int {
+        -__var(name).off
+    }
+
+    __load(slot: StackSlot, dst: Int) {
+        let t = match slot.size {
+            1 => U8,
+            2 => U16,
+            4 => U32,
+            8 => U64,
+            _ => throw RuntimeError("unsupported stack slot size: {slot.size}")
+        }
+        __load(rbp, -slot.off, t, dst)
+    }
+
+    __load(base: Int, off: Int, t: BpfType, dst: Int) {
+        pp({t})
+        match t {
+            U8  or I8  => __asm.ldx8(dst, base, off),
+            U16 or I16 => __asm.ldx16(dst, base, off),
+            U32 or I32 => __asm.ldx32(dst, base, off),
+            U64 or I64 => __asm.ldx64(dst, base, off),
+            AnyPtr(_)  => __asm.ldx64(dst, base, off),
+            AnyMap     => __asm.ldx64(dst, base, off),
+            Str(_)     => do {
+                __asm.mov64(dst, base);
+                if off != 0 {
+                    __asm.add64i(dst, off);
+                }
+            }
+            _   => throw RuntimeError("unsupported type for load: {t}")
+        }
+    }
+
+    __store(base: Int, off: Int, t: BpfType, src: Int) {
+        match t {
+            U8  or I8  => __asm.stx8(base, src, off),
+            U16 or I16 => __asm.stx16(base, src, off),
+            U32 or I32 => __asm.stx32(base, src, off),
+            U64 or I64 => __asm.stx64(base, src, off),
+            AnyPtr(_)  => __asm.stx64(base, src, off),
+            _   => throw RuntimeError("unsupported type for store: {t}")
+        }
+    }
+
+    __store-var(var: String | Var, src: Int) {
+        let var = (var :: String) ? __var(var) : var
+        if var.map :: map.PerCPUArray {
+            let ^_k = alloc()
+            let ^_v = alloc()
+
+            __asm.imov64(r0, 0)
+            _k.store(r0)
+
+            _v.store(src)
+
+            __asm.imov64(r4, 0)
+            _v.load-addr(r3)
+            _k.load-addr(r2)
+            var.load(r1)
+
+            __asm.call(helper.map_update_elem)
+        } else if var.local? || var.map? {
+            __store(rbp, -var.off, var.type, src)
+        } else {
+            let tmp = (src == r0) ? r1 : r0
+            __load(rbp, -var.off, U64, tmp)
+            __store(tmp, 0, var.type, src)
+        }
+    }
+
+    __load-var(var: String | Var, dst: Int, deref?: Bool = true) -> Slot {
+        let var = (var :: String) ? __var(var) : var
+        if var.map :: map.PerCPUArray {
+            let ^_k = alloc()
+            __asm.imov64(r0, 0)
+            _k.store(r0)
+
+            _k.load-addr(r2)
+            var.load(r1)
+
+            __asm.call(helper.map_lookup_elem)
+
+            // NULL check
+            let jump = __asm.jne64(r0, 0)
+            __asm.exit()
+            jump.patch()
+            
+            __load(r0, 0, var.type, dst)
+        } else if var.local? || var.map? {
+            __load(rbp, -var.off, var.type, dst)
+        } else if !deref? {
+            __load(rbp, -var.off, U64, dst)
+        } else {
+            __load(rbp, -var.off, U64, dst)
+            __load(r0, 0, var.type, dst)
+        }
+    }
+
+    __enter-loop(max: Int = 256) -> Var {
+        let var = __var("__loop{++__loop-depth}")
+        var.type = U16
+
+        __asm.imov64(r0, max)
+        __store-var(var, r0)
+
+        var
+    }
+
+    __check-loop(var: Var) {
+        __load-var(var, r0)
+        let jump = __asm.jle64(r0, 0)
+        __asm.sub64i(r0, 1)
+        __store-var(var, r0)
+        jump
+    }
+
+    __exit-loop() {
+        __loop-depth -= 1
+    }
+
+    __analyze-lvalue(lvalue: AST, t0: BpfType = nil) {
+        match lvalue {
+            ty.Id({name, ?constraint, *}) => {
+                let var = __var(name)
+                let typed? = (var.type != nil)
+
+                let t1 = (constraint != nil) ?: ty-to-bpf(constraint)
+
+                var.type = var.type ?? match (t0, t1) {
+                    (nil, nil) => throw RuntimeError("cannot infer type of variable: {name}"),
+                    (nil, $t)  => t,
+                    ($t, nil)  => t,
+                    ($t, t)    => t,
+                    (AnyInt, Const(_)) => t0,
+                    (Const(_), AnyInt) => t1,
+                    (t0, t1)   => throw RuntimeError("type mismatch for variable {name}: {t0} vs {t1}")
+                }
+
+                if let Const(_) = var.type {
+                    var.type = U64
+                }
+
+                if !typed? {
+                    match var.type {
+                        Hash(_, _) => {
+                            var.map = map.Hash(key-size=8, value-type=I64, max-buckets=1024)
+                        },
+
+                        _ => ;
+                    }
+                }
+            },
+
+            ty.Array([ty.ArrayItem({item, *})]) => {
+                let t0 = __analyze(item)
+                match t0 {
+                    AnyPtr(t) => t,
+                    _         => { pp(t0); throw RuntimeError("attempt to dereference non-pointer type: {t0}") }
+                }
+            },
+
+            ty.Subscript(target, index) => {
+                let t1 = __analyze(index)
+                let t2 = __analyze(target)
+                t0
+            },
+
+            _ => {}
+        }
+    }
+
+    __analyze(expr: AST) -> BpfType {
+        match expr {
+            ty.Id({name, *}) => {
+                __var(name).type
+            },
+
+            ty.Int(k) => {
+                Const(k)
+            },
+
+            ty.Let(target, value),
+            ty.Assign(target, value) => {
+                let t0 = __analyze(value)
+                __analyze-lvalue(target, t0)
+            },
+
+            ty.Multi(stmts) => {
+                for stmts {
+                    __analyze(it)
+                }
+                Unit
+            },
+
+            ty.Block(stmts) => {
+                for stmts {
+                    __analyze(it)
+                }
+                Unit
+            },
+
+            ty.Call({func: ty.Id({name, *}), args, *}) => {
+                for match args {
+                    ty.Arg({arg: value, *}) => __analyze(value),
+                    ty.Spread(value)        => __analyze(value)
+                }
+
+                match name {
+                    'now'   => I64,
+                    'tai'   => Time64,
+                    'print' => Unit,
+                    'hist'  => Hash(8, U64),
+                    'exit'  => nil
+                }
+            },
+
+            ty.If([cond], then, otherwise) => {
+                __analyze(cond)
+                let t0 = __analyze(then)
+                if otherwise != nil {
+                    __analyze(otherwise)
+                }
+                t0
+            },
+
+            ty.Cond(cond, then, otherwise) => {
+                __analyze(cond)
+                let t0 = __analyze(then)
+                if otherwise != nil {
+                    __analyze(otherwise)
+                }
+                t0
+            },
+
+            ty.While([cond], body) => {
+                __analyze(cond)
+                __analyze(body)
+                Unit
+            },
+
+            ty.Add(a, b) => {
+                let t0 = __analyze(a)
+                let t1 = __analyze(b)
+                match (t0, t1) {
+                    (Const(a), Const(b))
+                        => Const(a + b),
+
+                    (StackPtr(t, n), Const(k))
+                        => StackPtr(t, n + k),
+
+                    (AnyInt, AnyInt)
+                        => match (signed?(t0) || signed?(t1), max(size-of(t0), size-of(t1))) {
+                            (true,  8) => I64,
+                            (true,  4) => I32,
+                            (true,  2) => I16,
+                            (true,  1) => I8,
+                            (false, 8) => U64,
+                            (false, 4) => U32,
+                            (false, 2) => U16,
+                            (false, 1) => U8,
+                        },
+
+                    (AnyPtr(_), AnyInt) => t0,
+
+                    _ => throw RuntimeError("unsupported types for Add: {t0}, {t1}")
+                }
+            },
+
+            ty.Sub(a, b) => {
+                let t0 = __analyze(a)
+                let t1 = __analyze(b)
+                match (t0, t1) {
+                    (Const(a), Const(b))
+                        => Const(a - b),
+
+                    (StackPtr(t, n), Const(k))
+                        => StackPtr(t, n - k),
+
+                    (AnyInt, AnyInt)
+                        => match (signed?(t0) || signed?(t1), max(size-of(t0), size-of(t1))) {
+                            (true,  8) => I64,
+                            (true,  4) => I32,
+                            (true,  2) => I16,
+                            (true,  1) => I8,
+                            (false, 8) => U64,
+                            (false, 4) => U32,
+                            (false, 2) => U16,
+                            (false, 1) => U8,
+                        },
+
+                    (AnyPtr(_), AnyInt) => t0,
+
+                    _ => throw RuntimeError("unsupported types for Sub: {t0}, {t1}")
+                }
+            },
+
+            ty.Array([ty.ArrayItem({item, *})]) => {
+                let t0 = __analyze(item)
+                match t0 {
+                    AnyPtr(t) => t,
+                    _         => throw RuntimeError("attempt to dereference non-pointer type: {t0}")
+                }
+            },
+
+            ty.Record(items) => {
+                Record([__analyze(item) for ty.RecordEntry({item, *}) in items])
+            },
+
+            ty.Subscript(xs, idx) => {
+                let t0 = __analyze(xs)
+                let t1 = __analyze(idx)
+                pp({t0, t1})
+                match (t0, t1) {
+                    (AnyPtr(t), AnyInt or Const(_))
+                        => t,
+
+                    (Hash(k0, v0), _)
+                        => v0,
+
+                    _ => throw RuntimeError("unsupported types for Subscript: {t0}, {t1}")
+                }
+            },
+
+            ty.MemberAccess(target, member) => {
+                let t0 = __analyze(target)
+                match t0 {
+                    AnyPtr(Struct(fields))
+                        => {
+                            if let (off, bpf-type) = fields[member] {
+                                bpf-type
+                            } else {
+                                throw RuntimeError("unknown struct member: {member}")
+                            }
+                        },
+
+                    _ => throw RuntimeError("unsupported type for MemberAccess: {t0}")
+                }
+            },
+
+            ty.SpecialString(parts) => {
+                for match parts {
+                    ($expr, _, _, _) => __analyze(expr),
+                    _                => ()
+                }
+                nil
+            },
+
+            ty.Eq(a, b),
+            ty.LT(a, b),
+            ty.GT(a, b),
+            ty.LEQ(a, b),
+            ty.GEQ(a, b),
+            ty.NotEq(a, b)
+            => {
+                __analyze(a)
+                __analyze(b)
+                U64
+            },
+
+            ty.Not(x) => {
+                __analyze(x)
+                U64
+            },
+
+            _ => throw RuntimeError("unsupported expression: {expr}"),
+        }
+    }
+
+    __bop64(op: _, a: AST, b: AST) -> Slot {
+        let ^_a = __emit(a).spill()
+        let ^_b = __emit(b).spill()
+
+        _a.load(r0)
+        _b.load(r1)
+
+        op(r0, r1)
+
+        RegZeroSlot(self)
+    }
+
+    __emit(expr: AST) -> Slot | nil {
+        match expr {
+            ty.Id({name, *}) => {
+                __load-var(name, r0)
+                RegZeroSlot(self)
+            },
+
+            ty.Int(k) => {
+                __asm.imov64(r0, k)
+                RegZeroSlot(self)
+            },
+
+            ty.Add(a, b) => __bop64(__asm.add64, a, b),
+            ty.Sub(a, b) => __bop64(__asm.sub64, a, b),
+            ty.Mul(a, b) => __bop64(__asm.mul64, a, b),
+            ty.Div(a, b) => __bop64(__asm.div64, a, b),
+
+            ty.Eq(a, b) => {
+                let ^_a = __emit(a).spill()
+                let ^_b = __emit(b).spill()
+
+                _a.load(r0)
+                _b.load(r1)
+
+                let jump = __asm.jeq64x(r0, r1)
+                __asm.imov64(r0, 0)
+                let end = __asm.jmp64()
+                jump.patch()
+                __asm.imov64(r0, 1)
+                end.patch()
+
+                RegZeroSlot(self)
+            },
+
+            ty.Call({func: ty.Id({name, *}), args, *}) => {
+                match name {
+                    'exit' => {
+                        match args {
+                            [ty.Arg({arg, *})] => {
+                                let ^_arg = __emit(arg)
+                                _arg.load(r0)
+                                __asm.exit()
+                            },
+
+                            _ => throw RuntimeError('exit() expects one argument')
+                        }
+                    },
+
+                    'now' => {
+                        match args {
+                            [] => {
+                                __asm.call(helper.ktime_get_ns)
+                                RegZeroSlot(self)
+                            },
+
+                            _ => throw RuntimeError('now() expects no arguments')
+                        }
+                    },
+
+                    'tai' => {
+                        match args {
+                            [] => {
+                                __asm.call(helper.ktime_get_tai_ns)
+                                RegZeroSlot(self)
+                            },
+
+                            _ => throw RuntimeError('now() expects no arguments')
+                        }
+                    },
+
+                    'print' => {
+                        match args {
+                            [ty.Arg({arg, *})] => {
+                                __emit(arg)
+                            },
+
+                            _ => throw RuntimeError('print() expects one argument')
+                        }
+                    },
+
+                    _ => {}
+                }
+            },
+
+            ty.Let(target, value),
+            ty.Assign(target, value) => {
+                let ^_v = __emit(value)
+                match target {
+                    ty.Id({name, *}) => {
+                        _v.load(r0)
+                        __store-var(name, r0)
+                        RegZeroSlot(self)
+                    },
+
+                    ty.Array([ty.ArrayItem({item, *})]) => {
+                        _v = _v.spill()
+                        let ^_p = __emit(item).spill()
+                        _v.load(r0)
+                        _p.load(r1)
+                        __store(r1, 0, __analyze-lvalue(item) ?? __analyze(value), r0)
+                    },
+
+                    ty.Subscript(xs, idx) => {
+                        _v = _v.spill()
+
+                        let ^_i  = __emit(idx).spill()
+                        let ^_xs = __emit(xs).spill()
+
+                        _xs.load(r1)
+
+                        match __analyze(xs) {
+                            AnyPtr(t) => {
+                                _v.load(r2)
+                                _i.load(r0)
+                                __asm.imul64i(r0, size-of(t))
+                                __asm.add64(r1, r0)
+                                __store(r1, 0, t, r0)
+                                RegZeroSlot(self)
+                            },
+
+                            Hash(sz, t) => {
+                                let ^_k = nil
+                                let ^_tmp = nil
+
+                                __asm.mov64(r8, r1)
+
+                                match __analyze(idx) {
+                                    UserPtr(t0) or KernelPtr(t0) or UnknownPtr(t0) => do {
+                                        _k = alloc(sz)
+
+                                        _i.load(r3)
+                                        __asm.imov64(r2, sz)
+                                        _k.load-addr(r1)
+                                        __asm.call(match t0 {
+                                            I8 => helper.probe_read_str,
+                                            _  => helper.probe_read
+                                        })
+                                        _k.load-addr(r2)
+                                    },
+
+                                    AnyPtr(_) => _i.load(r2),
+
+                                    _         => _i.load-addr(r2)
+                                }
+
+                                match __analyze(value) {
+                                    UserPtr(t0) or KernelPtr(t0) or UnknownPtr(t0) => do {
+                                        _tmp = alloc(size-of(t))
+                                        __asm.mov64(r7, r2)
+
+                                        _v.load(r3)
+                                        __asm.imov64(r2, size-of(t))
+                                        _tmp.load-addr(r1)
+                                        __asm.call(match t {
+                                            I8 => helper.probe_read_str,
+                                            _  => helper.probe_read
+                                        })
+                                        _tmp.load-addr(r3)
+
+                                        __asm.mov64(r2, r7)
+                                    },
+
+                                    Str(n) => do {
+                                        _tmp = alloc(n)
+                                        __asm.mov64(r7, r2)
+
+                                        _v.load(r3)
+                                        __asm.imov64(r2, n)
+                                        _tmp.load-addr(r1)
+                                        __asm.call(helper.probe_read_str)
+                                        _tmp.load-addr(r3)
+
+                                        __asm.mov64(r2, r7)
+                                    },
+
+                                    _ => do {
+                                        _v.load-addr(r3)
+                                    }
+                                }
+
+                                __asm.mov64(r1, r8)
+                                __asm.imov64(r4, 0)
+                                __asm.call(helper.map_update_elem)
+                            },
+
+                            _ => throw RuntimeError("unsupported type for Subscript assignment")
+                        }
+                    },
+
+                    _ => {}
+                }
+            },
+
+            ty.Multi(stmts) => {
+                for stmts {
+                    __emit(it)
+                }
+            },
+
+            ty.Block(stmts) => {
+                for stmts {
+                    __emit(it)
+                }
+            },
+
+            ty.If([cond], then, otherwise),
+            ty.Cond(cond, then, otherwise) => {
+                let jump = match cond {
+                    ty.Eq(a, b) => do {
+                        let ^_a = __emit(a).spill()
+                        let ^_b = __emit(b).spill()
+                        _a.load(r0)
+                        _b.load(r1)
+                        __asm.jne64x(r0, r1)
+                    },
+
+                    ty.GT(a, b) => do {
+                        let ^_a = __emit(a).spill()
+                        let ^_b = __emit(b).spill()
+                        _a.load(r0)
+                        _b.load(r1)
+                        __asm.jle64x(r0, r1)
+                    },
+
+                    ty.Not(x) => do {
+                        let ^_x = __emit(x)
+                        _x.load(r0)
+                        __asm.jne64(r0, 0)
+                    },
+
+                    _ => do {
+                        let ^_cond = __emit(cond)
+                        _cond.load(r0)
+                        __asm.jeq64(r0, 0)
+                    }
+                }
+
+                let ^_ = __emit(then)
+                jump.patch()
+
+                if otherwise != nil {
+                    let end = __asm.jmp64()
+                    let ^_ = __emit(otherwise)
+                    end.patch()
+                }
+            },
+
+            ty.While([cond], body) => {
+                let limit = __enter-loop()
+                let start = __asm.label()
+
+                let jump = match cond {
+                    ty.Eq(a, b) => do {
+                        let ^_a = __emit(a).spill()
+                        let ^_b = __emit(b).spill()
+                        _a.load(r0)
+                        _b.load(r1)
+                        __asm.jne64x(r0, r1)
+                    },
+
+                    ty.NotEq(a, b) => do {
+                        let ^_a = __emit(a).spill()
+                        let ^_b = __emit(b).spill()
+                        _a.load(r0)
+                        _b.load(r1)
+                        __asm.jeq64x(r0, r1)
+                    },
+
+                    ty.Not(x) => do {
+                        let ^_x = __emit(x)
+                        _x.load(r0)
+                        __asm.jne64(r0, 0)
+                    },
+
+                    _ => do {
+                        let ^_cond = __emit(cond)
+                        _cond.load(r0)
+                        __asm.jeq64(r0, 0)
+                    }
+                }
+
+                let abort = __check-loop(limit)
+                let ^_ = __emit(body)
+                __asm.jmp64(to=start)
+                jump.patch()
+                abort.patch()
+
+                __exit-loop()
+            },
+
+            ty.MemberAccess(target, member) => {
+                let ^_target = __emit(target)
+                _target.load(r1)
+
+                match __analyze(target) {
+                    AnyPtr(Struct(fields))
+                        => {
+                            if let (off, bpf-type) = fields[member] {
+                                __load(r1, off, bpf-type, r0)
+                                RegZeroSlot(self)
+                            } else {
+                                throw RuntimeError("unknown struct member: {member}")
+                            }
+                        },
+
+                    t0 => throw RuntimeError("unsupported type for MemberAccess: {t0}")
+                }
+            },
+
+            ty.Record(items) => {
+                let items = [item for ty.RecordEntry({item, *}) in items]
+                let types = [__analyze(item) for item in items]
+                let slot = alloc(size-of(Record(types)))
+                let offset = 0
+
+                for i in ..#items {
+                    let ^_item = __emit(items[i]).spill()
+                    _item.load(r0)
+                    __store(rbp, -slot.off + offset, types[i], r0)
+                    offset += align(size-of(types[i]))
+                }
+
+                slot
+            },
+
+            ty.Array([ty.ArrayItem({item, *})]) => {
+                let ^_item = __emit(item)
+                match __analyze(item) {
+                    MapPtr(t0) or StackPtr(t0, _) => do {
+                        _item.load(r1)
+                        __load(r1, 0, t0, r0)
+                        RegZeroSlot(self)
+                    },
+
+                    KernelPtr(t0) or UserPtr(t0) => do {
+                        let sz = size-of(t0)
+                        let _out = alloc(sz)
+                        _item.load(r3)
+                        __asm.imov64(r2, sz)
+                        _out.load-addr(r1)
+                        __asm.call(helper.probe_read)
+                        _out
+                    },
+
+                    t0 => { pp(t0); throw RuntimeError("attempt to dereference non-pointer type: {t0}") }
+                }
+            },
+
+            ty.SpecialString(parts) => {
+                let to-send = []
+                let total-size = 0
+
+                __asm.imov64(r9, 0) // dynamic size counter
+
+                let parts = parts.reverse()
+                let (_, _, id, _) = parts.pop()
+
+                for part, i in parts {
+                    let i = #parts - i - 1
+                    match part {
+                        (expr, _, _, _) => do {
+                            let t0 = __analyze(expr)
+                            __fmts[id][2*i + 1].type = t0
+
+                            let slot = __emit(expr).spill()
+
+                            if t0.matches?(AnyPtr(I8)) {
+                                // string pointer
+                                __asm.imov64(r5, 8)
+                                slot.load-addr(r4)
+
+                                __get-string('%s', reg=r3)
+
+                                __asm.imov64(r2, 0)
+
+                                // dummy buffer in stack
+                                __asm.mov64(r1, rbp)
+                                __asm.add64i(r1, -8)
+
+                                __asm.call(helper.snprintf)
+
+                                // add to total size
+                                __asm.add64(r9, r0)
+                            }
+
+                            to-send.push((t0, slot))
+                        },
+
+                        _ => ()
+                    }
+                }
+
+                let total-size = to-send.map(size-of . &0).sum() ?? 0
+
+                // Set up dynptr address in r7
+                __asm.mov64(r7, rbp)
+                __asm.add64i(r7, __offset('__dynptr'))
+                
+                __load-var('__output', r1)
+                __asm.imov64(r2, total-size + 12)
+                __asm.add64(r2, r9)
+                __asm.imov64(r3, 0)
+                __asm.mov64(r4, r7)
+                __asm.call(helper.ringbuf_reserve_dynptr)
+
+                // Success check
+                let jump = __asm.jeq64(r0, 0)
+                __asm.imov64(r2, 0)
+                __asm.mov64(r1, r7)
+                __asm.call(helper.ringbuf_discard_dynptr)
+                __asm.imov64(r0, 1)
+                __asm.exit()
+                jump.patch()
+
+                // Push ID
+                let ^_tmp = alloc()
+                __asm.imov64(r0, id)
+                _tmp.store(r0)
+
+                // dynptr_write() ID at offset 0
+                __asm.imov64(r5, 0)
+                __asm.imov64(r4, 4)
+                _tmp.load-addr(r3)
+                __asm.imov64(r2, 0)
+                __asm.mov64(r1, r7)
+                __asm.call(helper.dynptr_write)
+
+                // dynptr_write() tgid_pid at offset 4
+                __asm.imov64(r5, 0)
+                __asm.imov64(r4, 8)
+
+                __var('tgid').load(r3)
+                __asm.shl64i(r3, 32)
+                __var('cpu').load(r0)
+                __asm.or64(r3, r0)
+                _tmp.store(r3)
+                _tmp.load-addr(r3)
+
+                __asm.imov64(r2, 4)
+                __asm.mov64(r1, r7)
+                __asm.call(helper.dynptr_write)
+
+                // r6 = current offset in dynptr
+                __asm.imov64(r6, 12)
+
+                // r8 = scratch pointer w/ per-CPU offset
+                __load-var('__scratch', r8, deref?=false)
+                __load-var('cpu', r0)
+                __asm.imul64i(r0, PER_CPU_SCRATCH)
+                __asm.add64(r8, r0)
+
+                for (t, ^slot) in to-send.reverse() {
+                    if t.matches?(AnyPtr(I8)) || t.matches?(Str(_)) {
+                        __asm.mov64(r1, r8)
+                        __asm.imov64(r2, PER_CPU_SCRATCH)
+                        slot.load(r3)
+                        __asm.call(helper.probe_read_str)
+
+                        // flags
+                        __asm.imov64(r5, 0)
+
+                        // length
+                        __asm.mov64(r4, r0)
+                        __asm.and64i(r4, PER_CPU_SCRATCH - 1)
+
+                        // map ptr
+                        __asm.mov64(r3, r8)
+
+                        // offset
+                        __asm.mov64(r2, r6)
+
+                        // dynptr address
+                        __asm.mov64(r1, r7)
+
+                        // advance offset
+                        __asm.add64(r6, r4)
+
+                        __asm.call(helper.dynptr_write)
+                    } else {
+                        let sz = size-of(t)
+
+                        let (mov, store) = match sz {
+                            1 => (__asm.mov8,  __asm.stx8),
+                            2 => (__asm.mov16, __asm.stx16),
+                            4 => (__asm.mov32, __asm.stx32),
+                            8 => (__asm.mov64, __asm.stx64),
+                            _ => throw RuntimeError("unsupported size for special string part: {sz}")
+                        }
+
+                        slot.load(r0)
+                        mov(r0, r0)
+                        with _tmp = alloc(sz) {
+                            _tmp.store(r0)
+                            __asm.imov64(r5, 0)
+                            __asm.imov64(r4, sz)
+                            _tmp.load-addr(r3)
+                            __asm.mov64(r2, r6)
+                            __asm.mov64(r1, r7)
+                            __asm.call(helper.dynptr_write)
+
+                            __asm.add64i(r6, sz)
+                        }
+                    }
+                }
+
+                __asm.mov64(r1, r7)
+                __asm.imov64(r2, 0)
+                __asm.call(helper.ringbuf_submit_dynptr)
+
+                nil
+            },
+
+            ty.Subscript(xs, idx) => {
+                let ^_i  = __emit(idx).spill()
+                let ^_xs = __emit(xs).spill()
+
+                _xs.load(r0)
+
+                match __analyze(xs) {
+                    MapPtr(t) or StackPtr(t, _) => do {
+                        let sz = size-of(t)
+                        _i.load(r1)
+                        __asm.imov64(r2, sz)
+                        __asm.mul64(r1, r2)
+                        __asm.add64(r0, r1)
+                        __load(r0, 0, t, r0)
+                        RegZeroSlot(self)
+                    },
+
+                    UserPtr(t) or KernelPtr(t) => do {
+                        let sz = size-of(t)
+                        _i.load(r1)
+                        __asm.imul64i(r1, sz)
+                        __asm.add64(r0, r1)
+
+                        __asm.mov64(r3, r0)
+                        __asm.imov64(r2, sz)
+
+                        let out = alloc(sz)
+                        out.load-addr(r1)
+
+                        __asm.call(helper.probe_read)
+
+                        out
+                    },
+
+                    Hash(sz, t) => do {
+                        let ^_tmp = nil
+
+                        __asm.mov64(r8, r0)
+
+                        match __analyze(idx) {
+                            UserPtr(t0) or KernelPtr(t0) or UnknownPtr(t0) => {
+                                _tmp = alloc(sz)
+                                _i.load(r3)
+                                __asm.imov64(r2, sz)
+                                _tmp.load-addr(r1)
+                                __asm.call(match t0 {
+                                    I8 => helper.probe_read_str,
+                                    _  => helper.probe_read
+                                })
+                                _tmp.load-addr(r2)
+                            },
+
+                            AnyPtr(_) => _i.load(r2),
+
+                            _         => _i.load-addr(r2)
+                        }
+
+                        __asm.mov64(r1, r8)
+                        __asm.call(helper.map_lookup_elem)
+
+                        let jump = __asm.jne64(r0, 0)
+                        let end = __asm.jmp64()
+                        jump.patch()
+                        __load(r0, 0, t, r0)
+                        end.patch()
+
+                        RegZeroSlot(self)
+                    },
+
+                    t => throw RuntimeError("unsupported type for Subscript: {t}")
+                }
+            },
+
+            _ => { pp(expr); throw RuntimeError("unsupported expression: {expr}") }
+        }
+    }
+
+    global(name: String, m: map.BpfMap, t: BpfType) -> Var {
+        let var = __var(name)
+        var.map = m
+        var.type = t
+        var
+    }
+
+    compile() {
+        let prog = ty.walk(__ast, expr -> match expr {
+            ty.SpecialString([_]) => expr,
+
+            ty.SpecialString(parts) => do {
+                let new-parts = []
+
+                for match parts {
+                    (expr, ty.SpecialString([fmt]), width, fun) => {
+                        new-parts.push((expr, ty.String(fmt), width, fun))
+                    },
+
+                    part => {
+                        new-parts.push(part)
+                    }
+                }
+
+                ty.SpecialString(new-parts)
+            },
+
+            _ => expr
+        })
+
+        let prog = ty.walk(prog, expr -> match expr {
+            ty.SpecialString(parts) => do {
+                let new-parts = [(nil, nil, #__fmts, nil)]
+                let key = []
+
+                for match parts {
+                    (expr, _fmt, width, fun) => {
+                        let fmt = match _fmt {
+                            ty.String(fmt) => fmt,
+                            _              => nil
+                        }
+                        new-parts.push((expr, nil, width, fun))
+                        key.push({
+                            fmt,
+                            width,
+                            type: nil,
+                            fun: (fun != nil) ?: ty.eval(fun)
+                        })
+                    },
+
+                    string => key.push(string)
+                }
+
+                __fmts.push(key)
+
+                ty.SpecialString(new-parts)
+            },
+
+            _ => expr
+        })
+
+        pp(prog)
+
+        __analyze(prog)
+
+        __stack-alloc = StackAllocator(__var-off, __asm)
+
+        // Store ctx (r1) on stack if we have it
+        if 'ctx' in __env {
+            __asm.stx64(rbp, r1, __offset('ctx'))
+        }
+
+        if 'comm' in __env {
+            __var('comm2').load-addr(r1)
+            __asm.stx64(rbp, r1, __offset('comm'))
+            __asm.imov64(r2, 16)
+            __asm.call(helper.get_current_comm)
+        }
+
+        if 'pid' in __env || 'tgpid' in __env {
+            __asm.call(helper.get_current_pid_tgid)
+            if 'tgid' in __env {
+                __asm.mov64(r1, r0)
+                __asm.shr64i(r1, 32)
+                __asm.stx64(rbp, r1, __offset('tgid'))
+            }
+            if 'pid' in __env {
+                __asm.and64i(r0, 0xFFFFFFFF)
+                __asm.stx32(rbp, r0, __offset('pid'))
+            }
+        }
+
+        __asm.call(helper.get_smp_processor_id)
+        __asm.stx32(rbp, r0, __offset('cpu'))
+
+        // Hang onto this in r6 for percpu lookups below
+        __asm.mov64(r6, r0)
+
+        for name, var in __env {
+            if let $m = var.map {
+                if m :: map.Array {
+                    __asm.ld_map_value(r1, m.fd, 0)
+                    __asm.stx64(rbp, r1, -var.off)
+                } else {
+                    __asm.ld_map_fd(r1, m.fd)
+                    __asm.stx64(rbp, r1, -var.off)
+                }
+            }
+        }
+
+        __emit(prog)
+
+        __asm.imov64(r0, 0)
+        __asm.exit()
+    }
+
+    load() {
+        __fd = load-bpf-prog(__asm)
+        for __tracing {
+            it.set-bpf(__fd)
+            it.enable()
+        }
+    }
+
+    ringbuf(name: String) -> map.RingBuffer {
+        if let $var = __env[name] {
+            var.map
+        } else {
+            let var = __var(name)
+            var.type = RingBuffer
+            var.map = map.RingBuffer()
+        }
+    }
+
+    trace(event: TraceEvent) {
+        __var('ctx').type = KernelPtr(Struct(event.ctx))
+        __var('comm2', size=16).type = Str(16)
+        __var('comm').type = StackPtr(I8, 16)
+        __var('pid').type = U32
+        __var('tgid').type = U32
+        __tracing.push(event.open())
+    }
+
+    asm -> BpfAssembler {
+        __asm
+    }
+
+    out -> map.RingBuffer {
+        __output.map
+    }
+}
+
+pub ns map {
+    trait BpfMap {
+        fd -> Int;
+    }
+
+    pub class RingBuffer : BpfMap {
+        __cap:   Int
+        __attr:  bpf_attr_map_create
+        __fd:    Int
+        __p-pos: Ptr[Int]
+        __c-pos: Ptr[Int]
+        __data:  Ptr[Int]
+
+        init(capacity: Int = 16 * 1024 * 1024) {
+            if capacity % PAGE_SIZE != 0 {
+                throw RuntimeError("capacity must be a multiple of the page size ({PAGE_SIZE})")
+            }
+
+            __cap = capacity
+
+            __attr = bpf_attr_map_create()
+            __attr.map_type = BPF_MAP_TYPE_RINGBUF
+            __attr.max_entries = capacity
+            __fd = bpf(BPF_MAP_CREATE, __attr)
+
+            if __fd < 0 {
+                throw OSError('bpf(BPF_MAP_CREATE)')
+            }
+
+            __c-pos = mmap(nil, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, __fd, 0)
+            if __c-pos == nil {
+                throw OSError('mmap()')
+            }
+
+            __p-pos = mmap(nil, PAGE_SIZE, PROT_READ, MAP_SHARED, __fd, PAGE_SIZE)
+            if __p-pos == nil {
+                throw OSError('mmap()')
+            }
+
+            __data = mmap(nil, capacity, PROT_READ, MAP_SHARED, __fd, 2 * PAGE_SIZE)
+            if __data == nil {
+                throw OSError('mmap()')
+            }
+        }
+
+        pending? -> Bool {
+            let p = atomic.load(c.u32, __p-pos)
+            let c = atomic.load(c.u32, __c-pos)
+            p != c
+        }
+
+        fd -> Int {
+            __fd
+        }
+
+        try-read(out: Blob = nil) -> Blob | nil {
+            let _p = atomic.load(c.u32, __p-pos)
+            let _c = atomic.load(c.u32, __c-pos)
+
+            if _p == _c {
+                return nil
+            }
+
+            let off = _c & (__cap - 1)
+            let record = __data + off
+            let header = c.load(c.u64, record)
+            let size = header & 0xFFFFFFFF
+
+            let out = out ?? Blob()
+            out.push(record + 8, size)
+
+            _c = _c + ((8 + size + 7) & ~7)
+            atomic.store(c.u32, __c-pos, _c)
+
+            out
+        }
+    }
+
+    pub class Array : BpfMap {
+        __attr:  bpf_attr_map_create
+        __fd:    Int
+
+        init(count: Int, value-size: Int) {
+            __attr = bpf_attr_map_create()
+            __attr.map_type = BPF_MAP_TYPE_ARRAY
+            __attr.key_size = 4
+            __attr.value_size = value-size
+            __attr.max_entries = count
+            __fd = bpf(BPF_MAP_CREATE, __attr)
+            if __fd < 0 {
+                throw OSError('bpf(BPF_MAP_CREATE)')
+            }
+        }
+
+        fd -> Int {
+            __fd
+        }
+
+        #() -> Int {
+            __attr.max_entries
+        }
+
+        size -> Int {
+            __attr.max_entries * __attr.value_size
+        }
+    }
+
+    pub class PerCPUArray : BpfMap {
+        __attr:  bpf_attr_map_create
+        __fd:    Int
+
+        init(count: Int, value-size: Int) {
+            __attr = bpf_attr_map_create()
+            __attr.map_type = BPF_MAP_TYPE_PERCPU_ARRAY
+            __attr.key_size = 4
+            __attr.value_size = value-size
+            __attr.max_entries = count
+            __fd = bpf(BPF_MAP_CREATE, __attr)
+            if __fd < 0 {
+                throw OSError('bpf(BPF_MAP_CREATE)')
+            }
+        }
+
+        fd -> Int {
+            __fd
+        }
+
+        #() -> Int {
+            __attr.max_entries
+        }
+
+        size -> Int {
+            __attr.max_entries * __attr.value_size
+        }
+    }
+
+    pub class Hash : BpfMap {
+        __attr:       bpf_attr_map_create
+        __fd:         Int
+        __key-size:   Int
+        __value-type: BpfType
+
+        init(key-size: Int, value-type: BpfType, max-buckets: Int = 1024) {
+            __key-size = key-size
+            __value-type = value-type
+
+            __attr = bpf_attr_map_create()
+            __attr.map_type = BPF_MAP_TYPE_HASH
+            __attr.key_size = key-size
+            __attr.value_size = size-of(value-type)
+            __attr.max_entries = max-buckets
+
+            __fd = bpf(BPF_MAP_CREATE, __attr)
+            if __fd < 0 {
+                throw OSError('bpf(BPF_MAP_CREATE)')
+            }
+        }
+
+        fd -> Int {
+            __fd
+        }
+
+        key-size -> Int {
+            __key-size
+        }
+
+        value-type -> BpfType {
+            __value-type
+        }
+
+        dump() {
+            let cursor = c.alloc(__key-size)
+            let next-cursor = c.alloc(__key-size)
+            let value-buf = c.alloc(size-of(__value-type))
+
+            let attr = bpf_attr_map_elem()
+            attr.map_fd = __fd
+            attr.key    = nil
+            attr.value  = next-cursor
+
+            // Get first key
+            if bpf(BPF_MAP_GET_NEXT_KEY, attr) < 0 {
+                throw OSError('bpf(BPF_MAP_GET_NEXT_KEY)')
+            }
+
+            let results = []
+            for (;;) {
+                c.memcpy(cursor, next-cursor, __key-size)
+                
+                // Lookup value
+                attr.key   = cursor
+                attr.value = value-buf
+                if bpf(BPF_MAP_LOOKUP_ELEM, attr) == 0 {
+                    let key = ptr.typed(cursor, c.u64)
+                    let key = tuple(*(key[it] for ..(__key-size / 8)))
+                    results.push((key, c.str(value-buf)))
+                }
+                
+                // Get next key
+                attr.value = next-cursor
+                if bpf(BPF_MAP_GET_NEXT_KEY, attr) < 0 {
+                    break
+                }
+            }
+            
+            return results
+        }
+    }
+}
+
+pub class TraceEvent {
+    __name:     String
+    __id:       Int
+    __ctx:      Dict[String, (Int, BpfType)]
+
+    name -> String {
+        __name
+    }
+
+    ctx -> Dict[String, (Int, BpfType)] {
+        __ctx
+    }
+
+    static __get-format(name: String) -> String {
+        if let $content = slurp("/sys/kernel/debug/tracing/events/{name}/format") {
+            content
+        } else {
+            throw RuntimeError("failed to read tracepoint format for {name}")
+        }
+    }
+
+    static __get-id(name: String) -> Int {
+        if let $content = slurp("/sys/kernel/debug/tracing/events/{name}/id") {
+            int(content.strip())
+        } else {
+            throw RuntimeError("failed to read tracepoint ID for {name}")
+        }
+    }
+
+    static __load-ctx(tracepoint: String) -> Dict[String, (Int, BpfType)] {
+        let format = __get-format(tracepoint)
+
+        let fields = format
+            .lines()
+            .filter!(/^\s*field:/)
+            .map(\_.split('\t'))
+            .map(match [_, field, offset, *] => (
+                field.comb(/^field:|;/),
+                offset.comb(/^offset:|;/).int
+            ))
+
+        let ctx = %{}
+
+        for (field, off) in fields {
+            match parse(field) {
+                {pointee: $t, const?, ident, *} 
+                    => {
+                        if const? {
+                            ctx[ident] = (off, KernelPtr(c-to-bpf(t)))
+                        } else {
+                            ctx[ident] = (off, UserPtr(c-to-bpf(t)))
+                        }
+                    },
+
+                {name: $name, ident, *} 
+                    => {
+                        if let $bpf-type = c-type-map[name] {
+                            ctx[ident] = (off, bpf-type)
+                        } else {
+                            throw RuntimeError("unsupported C type in syscall arg: {name}")
+                        }
+                    },
+
+                t => do { pp(t); throw RuntimeError("unsupported C type in syscall arg: {t}") }
+            }
+        }
+
+        ctx
+    }
+
+
+    init(name: String) {
+        __name = name
+        __id   = TraceEvent.__get-id(name)
+        __ctx  = TraceEvent.__load-ctx(name)
+    }
+
+    open() -> TracepointHandle {
+        let attr = perf_event_attr(
+            type=PERF_TYPE_TRACEPOINT,
+            size=#perf_event_attr,
+            config=__id,
+            sample_period_or_freq=1,
+            flags=1  // disabled
+        )
+
+        let fd = c.syscall(
+            SYS_perf_event_open,
+            (c.ptr, attr),
+            (c.int, -1),
+            (c.int, 0),
+            (c.int, -1),
+            (c.ulong, 0)
+        )
+
+        if fd < 0 {
+            throw OSError('perf_event_open()')
+        }
+
+        TracepointHandle(fd, self)
+    }
+}
+
+pub class TracepointHandle {
+    __fd:       Int
+    __event:    TraceEvent
+    __bpf-fd:   Int
+    __enabled?: Bool
+
+    init(fd: Int, event: TraceEvent) {
+        __fd = fd
+        __event = event
+        __bpf-fd = -1
+        __enabled? = false
+    }
+
+    set-bpf(fd: Int) {
+        let ret = ioctl(__fd, PERF_EVENT_IOC_SET_BPF, (c.int, fd))
+        if ret < 0 {
+            throw OSError('ioctl(PERF_EVENT_IOC_SET_BPF)')
+        }
+        __bpf-fd = fd
+    }
+
+    enable() {
+        let ret = ioctl(__fd, PERF_EVENT_IOC_ENABLE, (c.int, 0))
+        if ret < 0 {
+            throw OSError('ioctl(PERF_EVENT_IOC_ENABLE)')
+        }
+        __enabled? = true
+    }
+
+    disable() {
+        let ret = ioctl(__fd, PERF_EVENT_IOC_DISABLE, (c.int, 0))
+        if ret < 0 {
+            throw OSError('ioctl(PERF_EVENT_IOC_DISABLE)')
+        }
+        __enabled? = false
+    }
+
+    enabled? -> Bool {
+        __enabled?
+    }
+}
+
+fn load-bpf-prog(prog: BpfAssembler) -> Int {
+    let attr = bpf_attr_prog_load()
+    attr.prog_type = BPF_PROG_TYPE_TRACEPOINT
+    attr.insns = prog
+    attr.insn_cnt = #prog
+    attr.license = c.c_str("GPL")
+
+    let fd = bpf(BPF_PROG_LOAD, attr)
+    if fd < 0 {
+        attr.log_buf = c.alloc(655360)
+        attr.log_size = 655360
+        attr.log_level = 1
+
+        bpf(BPF_PROG_LOAD, attr)
+
+        eprint(c.as_str(attr.log_buf))
+
+        throw OSError("bpf(BPF_PROG_LOAD)")
+    }
+
+    fd
+}
+
+pub class BpfContext {
+    __progs: Array[BpfProgram]
+    __maps:  Dict[String, map.BpfMap]
+
+    init() {
+        __progs = []
+        __maps  = %{}
+    }
+
+    array(name: String, count: Int = 1, value-size: Int = 8) -> map.Array {
+        match __maps[name] {
+            m: map.Array
+                => m,
+
+            nil => (__maps[name] = map.Array(count, value-size)),
+
+            _   => throw RuntimeError("map name conflict: {name}")
+        }
+    }
+
+    per-cpu-array(name: String, count: Int = 1, value-size: Int = 8) -> map.PerCPUArray {
+        match __maps[name] {
+            m: map.PerCPUArray
+                => m,
+
+            nil => (__maps[name] = map.PerCPUArray(count, value-size)),
+
+            _   => throw RuntimeError("map name conflict: {name}")
+        }
+    }
+
+    hash(
+        name: String,
+        key-size: Int,
+        value-type: BpfType,
+        max-buckets: Int = 1024
+    ) -> map.Hash {
+        match __maps[name] {
+            m: map.Hash
+                => m,
+
+            nil => (__maps[name] = map.Hash(key-size, value-type, max-buckets)),
+
+            _   => throw RuntimeError("map name conflict: {name}")
+        }
+    }
+
+    prog(prog: AST) -> BpfProgram {
+        let prog = BpfProgram(prog, self)
+        for name, val in __maps {
+            prog.global(name, val, match val {
+                m: map.Array         => I64,
+                m: map.PerCPUArray   => I64,
+                m: map.Hash          => Hash(m.key-size, m.value-type),
+                m: map.RingBuffer    => RingBuffer,
+                _                    => throw RuntimeError("unsupported map type for global: {name}")
+            })
+        }
+        __progs.push(prog)
+        __progs[-1]
+    }
+}

@@ -1,0 +1,173 @@
+import atomic
+import ffi as c
+import os (..)
+import time
+
+import ebpf (..)
+
+fn go() {
+    let ctx = BpfContext()
+    let writes = ctx.hash('writes',  16, U64,      256)
+    let opens  = ctx.hash('opens',   8,  Str(128), 256)
+    let files  = ctx.hash('files',   16, Str(128), 256)
+
+    let prog1 = ctx.prog($$[
+        let argv = ctx.argv
+        let i = 0
+
+        print("({g_n}) {tai()} {comm:-12} {tgid:-6} {pid:-6}  ")
+
+        while argv[i] {
+            print(" {argv[i]}")
+            i = i + 1
+        }
+
+        g_n = g_n + 1
+
+        print("\n")
+    $$])
+
+    let prog2 = ctx.prog($$[
+        g_n = g_n + 1
+        t_n = t_n + 1
+        g_i = g_i + 1
+        if g_i == 100 {
+            g_i = 0
+            print(">>> write({cpu}, {g_n}, {t_n}): comm={comm}, pid={pid}, fd={ctx.fd}, count={ctx.count}\n")
+        }
+    $$])
+
+    let prog3 = ctx.prog($$[
+        g_n = g_n + 1
+        t_n = t_n + 1
+        g_i = g_i + 1
+        writes[comm] = writes[comm] + ctx.ret
+        if g_i == 100 {
+            g_i = 0
+            print("<<< write({cpu}, {g_n}, {t_n}): comm={comm}, pid={pid}, ret={ctx.ret}   total={writes[comm]}\n")
+        }
+    $$])
+
+    let prog4 = ctx.prog($$[
+        starts[pid] = now()
+    $$])
+
+    let prog5 = ctx.prog($$[
+        opens[pid] = ctx.filename
+    $$])
+
+    let prog6 = ctx.prog($$[
+        files[(tgid, ctx.ret)] = opens[pid]
+        print("{comm}: open({opens[pid]}) -> fd={ctx.ret}\n")
+    $$])
+
+    let enter-write   = TraceEvent('syscalls/sys_enter_write')
+    let exit-write    = TraceEvent('syscalls/sys_exit_write')
+    let enter-execve  = TraceEvent('syscalls/sys_enter_execve')
+    let enter-open    = TraceEvent('syscalls/sys_enter_openat')
+    let exit-open     = TraceEvent('syscalls/sys_exit_openat')
+
+    prog5.trace(enter-open)
+    prog6.trace(exit-open)
+
+    let progs = [prog5, prog6]
+
+    for progs {
+        it.compile()
+        print("BPF program: ({#it.asm} instructions)")
+        print(it.asm.dis)
+        it.load()
+    }
+
+    let buffers = %{*: Blob()}
+    let last-cleanup = time.now()
+
+    //printf('\nN   %-20s %-12s %-6s  %s\n', 'TIME', 'COMM', 'TGID', 'PID', 'ARGS')
+
+    let stop = false
+    let sigint = () -> do { stop = true; }
+
+    signal(SIGINT, sigint)
+
+    while !stop {
+        for prog in progs {
+            while let $data = prog.out.try-read() {
+                //print("data: {#data} bytes")
+                //print("      {["{c:02x}" for c in data].unwords()}")
+
+                let ptr = data.ptr()
+
+                let string-id = c.load(c.u32, ptr)
+                ptr += 4
+
+                let tid = c.load(c.u64, ptr)
+                ptr += 8
+
+                let specs = prog.strings[string-id]
+                let buf = buffers[tid]
+
+                for spec in specs {
+                    match spec {
+                        {type: $t, fmt, *} => {
+                            let str? = false
+
+                            let value = match t {
+                                U8  => c.load(c.u8, ptr),
+                                I8  => c.load(c.i8, ptr),
+                                U16 => c.load(c.u16, ptr),
+                                I16 => c.load(c.i16, ptr),
+                                U32 => c.load(c.u32, ptr),
+                                I32 => c.load(c.i32, ptr),
+                                U64 => c.load(c.u64, ptr),
+                                I64 => c.load(c.i64, ptr),
+
+                                Time64 => Moment(c.load(c.u64, ptr) / 1e9),
+
+                                AnyPtr(I8) or Str(_) => do {
+                                    str? = true
+                                    c.as_str(ptr)
+                                },
+
+                                _   => throw RuntimeError("unsupported type in print spec: {t}")
+                            }
+
+                            buf.push(fmt ? "{value:{fmt}}" : "{value}")
+
+                            ptr += str? ? (value.size() + 1) : size-of(t)
+                        },
+
+                        (s: String) => buf.push(s)
+                    }
+                }
+
+                while let $i = buf.search(0x0a) {
+                    let line = buf.splice(0, i + 1).str!()
+                    print(line, end='')
+                }
+            }
+        }
+
+        if (time.now() - last-cleanup) > 3.0 {
+            let obsolete = %{}
+
+            for tid, buf in buffers {
+                if #buf == 0 {
+                    obsolete << tid
+                }
+            }
+
+            buffers -= obsolete
+
+            last-cleanup = time.now()
+        }
+
+        sleep(0.01)
+    }
+
+    //print(["{k:16}: {v/1.0e6 : .2}ms" for (k, v) in writes.dump-all()].unlines())
+    print()
+    pp(opens.dump())
+    pp(files.dump())
+}
+
+go()
