@@ -84,7 +84,7 @@ C! struct Dwarf_Die {
     Dwarf_Addr addr;
     void *cu;
     void *abbrev;
-    long padding;
+    long int padding;
 }
 
 C! struct Dwarf_Attribute {
