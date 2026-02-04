@@ -24,12 +24,12 @@ pub const __aligned_u64 = c.ptr
 // 	__s16   off;		/* signed offset */
 // 	__s32   imm;		/* signed immediate constant */
 // };
-// 
+//
 // /* Header for bpf_lpm_trie_key structs */
 // struct bpf_lpm_trie_key_hdr {
 // 	__u32	prefixlen;
 // };
-// 
+//
 // /* Key of an a BPF_MAP_TYPE_LPM_TRIE entry, with trailing byte array. */
 // struct bpf_lpm_trie_key_u8 {
 // 	union {
@@ -38,12 +38,12 @@ pub const __aligned_u64 = c.ptr
 // 	};
 // 	__u8	data[];		/* Arbitrary size */
 // };
-// 
+//
 // struct bpf_cgroup_storage_key {
 // 	__u64	cgroup_inode_id;	/* cgroup inode id */
 // 	__u32	attach_type;		/* program attach type (enum bpf_attach_type) */
 // };
-// 
+//
 // enum bpf_cgroup_iter_order {
 // 	BPF_CGROUP_ITER_ORDER_UNSPEC = 0,
 // 	BPF_CGROUP_ITER_SELF_ONLY,		/* process only a single object. */
@@ -51,14 +51,14 @@ pub const __aligned_u64 = c.ptr
 // 	BPF_CGROUP_ITER_DESCENDANTS_POST,	/* walk descendants in post-order. */
 // 	BPF_CGROUP_ITER_ANCESTORS_UP,		/* walk ancestors upward. */
 // };
-// 
+//
 // union bpf_iter_link_info {
 // 	struct {
 // 		__u32	map_fd;
 // 	} map;
 // 	struct {
 // 		enum bpf_cgroup_iter_order order;
-// 
+//
 // 		/* At most one of cgroup_fd and cgroup_id can be non-zero. If
 // 		 * both are zero, the walk starts from the default cgroup v2
 // 		 * root. For walking v1 hierarchy, one should always explicitly
@@ -74,7 +74,7 @@ pub const __aligned_u64 = c.ptr
 // 		__u32	pid_fd;
 // 	} task;
 // };
-// 
+//
 // /* BPF syscall commands, see bpf(2) man-page for more details. */
 // /**
 //  * DOC: eBPF Syscall Preamble
@@ -819,7 +819,7 @@ pub const __aligned_u64 = c.ptr
 //  *	to the object have been closed and no references remain pinned to the
 //  *	filesystem or attached (for example, bound to a program or device).
 //  */
-// 
+//
 // /* cgroup-bpf attach flags used in BPF_PROG_ATTACH command
 //  *
 //  * NONE(default): No further bpf programs allowed in the subtree.
@@ -872,14 +872,14 @@ pub const __aligned_u64 = c.ptr
 // #define BPF_F_AFTER		(1U << 4)
 // #define BPF_F_ID		(1U << 5)
 // #define BPF_F_LINK		BPF_F_LINK /* 1 << 13 */
-// 
+//
 // /* If BPF_F_STRICT_ALIGNMENT is used in BPF_PROG_LOAD command, the
 //  * verifier will perform strict alignment checking as if the kernel
 //  * has been built with CONFIG_EFFICIENT_UNALIGNED_ACCESS not set,
 //  * and NET_IP_ALIGN defined to 2.
 //  */
 // #define BPF_F_STRICT_ALIGNMENT	(1U << 0)
-// 
+//
 // /* If BPF_F_ANY_ALIGNMENT is used in BPF_PROG_LOAD command, the
 //  * verifier will allow any alignment whatsoever.  On platforms
 //  * with strict alignment requirements for loads ands stores (such
@@ -893,7 +893,7 @@ pub const __aligned_u64 = c.ptr
 //  * the one we are interested in.
 //  */
 // #define BPF_F_ANY_ALIGNMENT	(1U << 1)
-// 
+//
 // /* BPF_F_TEST_RND_HI32 is used in BPF_PROG_LOAD command for testing purpose.
 //  * Verifier does sub-register def/use analysis and identifies instructions whose
 //  * def only matters for low 32-bit, high 32-bit is never referenced later
@@ -911,10 +911,10 @@ pub const __aligned_u64 = c.ptr
 //  * regress tests to expose bugs.
 //  */
 // #define BPF_F_TEST_RND_HI32	(1U << 2)
-// 
+//
 // /* The verifier internal test flag. Behavior is undefined */
 // #define BPF_F_TEST_STATE_FREQ	(1U << 3)
-// 
+//
 // /* If BPF_F_SLEEPABLE is used in BPF_PROG_LOAD command, the verifier will
 //  * restrict map and helper usage for such programs. Sleepable BPF programs can
 //  * only be attached to hooks where kernel execution context allows sleeping.
@@ -922,39 +922,39 @@ pub const __aligned_u64 = c.ptr
 //  * bpf_copy_from_user().
 //  */
 // #define BPF_F_SLEEPABLE		(1U << 4)
-// 
+//
 // /* If BPF_F_XDP_HAS_FRAGS is used in BPF_PROG_LOAD command, the loaded program
 //  * fully support xdp frags.
 //  */
 // #define BPF_F_XDP_HAS_FRAGS	(1U << 5)
-// 
+//
 // /* If BPF_F_XDP_DEV_BOUND_ONLY is used in BPF_PROG_LOAD command, the loaded
 //  * program becomes device-bound but can access XDP metadata.
 //  */
 // #define BPF_F_XDP_DEV_BOUND_ONLY	(1U << 6)
-// 
+//
 // /* The verifier internal test flag. Behavior is undefined */
 // #define BPF_F_TEST_REG_INVARIANTS	(1U << 7)
-// 
+//
 // /* link_create.kprobe_multi.flags used in LINK_CREATE command for
 //  * BPF_TRACE_KPROBE_MULTI attach type to create return probe.
 //  */
 // enum {
 // 	BPF_F_KPROBE_MULTI_RETURN = (1U << 0)
 // };
-// 
+//
 // /* link_create.uprobe_multi.flags used in LINK_CREATE command for
 //  * BPF_TRACE_UPROBE_MULTI attach type to create return probe.
 //  */
 // enum {
 // 	BPF_F_UPROBE_MULTI_RETURN = (1U << 0)
 // };
-// 
+//
 // /* link_create.netfilter.flags used in LINK_CREATE command for
 //  * BPF_PROG_TYPE_NETFILTER to enable IP packet defragmentation.
 //  */
 // #define BPF_F_NETFILTER_IP_DEFRAG (1U << 0)
-// 
+//
 // /* When BPF ldimm64's insn[0].src_reg != 0 then this can have
 //  * the following extensions:
 //  *
@@ -968,7 +968,7 @@ pub const __aligned_u64 = c.ptr
 //  */
 const BPF_PSEUDO_MAP_FD = 1
 // #define BPF_PSEUDO_MAP_IDX	5
-// 
+//
 // /* insn[0].src_reg:  BPF_PSEUDO_MAP_[IDX_]VALUE
 //  * insn[0].imm:      map fd or fd_idx
 //  * insn[1].imm:      offset into value
@@ -979,7 +979,7 @@ const BPF_PSEUDO_MAP_FD = 1
 //  */
 const BPF_PSEUDO_MAP_VALUE = 2
 // #define BPF_PSEUDO_MAP_IDX_VALUE	6
-// 
+//
 // /* insn[0].src_reg:  BPF_PSEUDO_BTF_ID
 //  * insn[0].imm:      kernel btd id of VAR
 //  * insn[1].imm:      0
@@ -999,7 +999,7 @@ const BPF_PSEUDO_MAP_VALUE = 2
 //  * verifier type:    PTR_TO_FUNC.
 //  */
 // #define BPF_PSEUDO_FUNC		4
-// 
+//
 // /* when bpf_call->src_reg == BPF_PSEUDO_CALL, bpf_call->imm == pc-relative
 //  * offset to another bpf function
 //  */
@@ -1008,7 +1008,7 @@ const BPF_PSEUDO_MAP_VALUE = 2
 //  * bpf_call->imm == btf_id of a BTF_KIND_FUNC in the running kernel
 //  */
 // #define BPF_PSEUDO_KFUNC_CALL	2
-// 
+//
 // /* flags for BPF_MAP_UPDATE_ELEM command */
 enum! {
 	BPF_ANY		= 0, /* create new element or update existing */
@@ -1016,7 +1016,7 @@ enum! {
 	BPF_EXIST	= 2, /* update existing element */
 	BPF_F_LOCK	= 4, /* spin_lock-ed map_lookup/map_update */
 };
-// 
+//
 /* flags for BPF_MAP_CREATE command */
 enum! {
 	BPF_F_NO_PREALLOC	= (1 << 0),
@@ -1062,28 +1062,28 @@ enum! {
 /* Get path from provided FD in BPF_OBJ_PIN/BPF_OBJ_GET commands */
 	BPF_F_PATH_FD		= (1 << 14),
 };
-// 
+//
 // /* Flags for BPF_PROG_QUERY. */
-// 
+//
 // /* Query effective (directly attached + inherited from ancestor cgroups)
 //  * programs that will be executed for events within a cgroup.
 //  * attach_flags with this flag are always returned 0.
 //  */
 // #define BPF_F_QUERY_EFFECTIVE	(1U << 0)
-// 
+//
 // /* Flags for BPF_PROG_TEST_RUN */
-// 
+//
 // /* If set, run the test on the cpu specified by bpf_attr.test.cpu */
 // #define BPF_F_TEST_RUN_ON_CPU	(1U << 0)
 // /* If set, XDP frames will be transmitted after processing */
 // #define BPF_F_TEST_XDP_LIVE_FRAMES	(1U << 1)
-// 
+//
 // /* type for BPF_ENABLE_STATS */
 // enum bpf_stats_type {
 // 	/* enabled run_time_ns and run_cnt */
 // 	BPF_STATS_RUN_TIME = 0,
 // };
-// 
+//
 // enum bpf_stack_build_id_status {
 // 	/* user space need an empty entry to identify end of a trace */
 // 	BPF_STACK_BUILD_ID_EMPTY = 0,
@@ -1092,7 +1092,7 @@ enum! {
 // 	/* couldn't get build_id, fallback to ip */
 // 	BPF_STACK_BUILD_ID_IP = 2,
 // };
-// 
+//
 // #define BPF_BUILD_ID_SIZE 20
 // struct bpf_stack_build_id {
 // 	__s32		status;
@@ -1102,7 +1102,7 @@ enum! {
 // 		__u64	ip;
 // 	};
 // };
-// 
+//
 
 const BPF_OBJ_NAME_LEN = 16
 
@@ -1674,7 +1674,27 @@ enum! {
 	BPF_PERF_EVENT_EVENT = 6,
 };
 
+enum! {
+	BPF_RINGBUF_BUSY_BIT	    = (1 << 31),
+	BPF_RINGBUF_DISCARD_BIT	    = (1 << 30),
+	BPF_RINGBUF_HDR_SZ	    = 8,
+        BPF_RINGBUF_SIZE_MASK       = 0xFFFFFFFF & ~(BPF_RINGBUF_BUSY_BIT | BPF_RINGBUF_DISCARD_BIT),
+};
 
+enum! {
+	BPF_F_SKIP_FIELD_MASK		= 0xff,
+	BPF_F_USER_STACK		= (1 << 8),
+/* flags used by BPF_FUNC_get_stackid only. */
+	BPF_F_FAST_STACK_CMP		= (1 << 9),
+	BPF_F_REUSE_STACKID		= (1 << 10),
+/* flags used by BPF_FUNC_get_stack only. */
+	BPF_F_USER_BUILD_ID		= (1 << 11),
+};
+
+enum! {
+	BPF_RB_NO_WAKEUP		= (1 << 0),
+	BPF_RB_FORCE_WAKEUP		= (1 << 1),
+};
 
 // instruction classes
 pub const BPF_LD   = 0x00
@@ -1736,7 +1756,6 @@ pub const BPF_ALU64 = 0x07
 
 
 // ld/ldx fields
-pub const BPF_DW = 0x18
 pub const BPF_MEMSX = 0x80
 pub const BPF_ATOMIC = 0xc0
 pub const BPF_XADD = 0xc0
@@ -2203,11 +2222,6 @@ pub ns helper {
         'cgrp_storage_get',
         'cgrp_storage_delete'
     ]
-}
-
-
-C! fn {
-    void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
 }
 
 pub fn bpf(cmd: Int, attr: _) -> Int {

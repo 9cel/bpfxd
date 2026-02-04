@@ -1,0 +1,163 @@
+import ffi as c
+import ptr (typed)
+import os (..)
+import time
+import chalk (chalk)
+import path (Path)
+import sh (sh)
+import ty
+import ty.parse as parse
+import ty.token as lex
+import ty.lex as _lex
+import log (..)
+
+import ebpf (..)
+import dwarf
+
+const ctx = BpfContext()
+let   end = nil
+
+fn comm(key: Blob) {
+    if let $i = key.search(0) {
+        key.str(0, i)
+    } else {
+        key.str()
+    }
+}
+
+fn quote(arg: String) -> String {
+    if arg.match?(/[ "'\\]/) {
+        arg = arg.sub('\\', '\\\\')
+        arg = arg.sub('"', '\\"')
+        "\"{arg}\""
+    } else {
+        arg
+    }
+}
+
+fn fail(msg) {
+    throw RuntimeError("parse error: {msg}")
+}
+
+fn check(type, %kwargs) {
+    let tok = lex.peek()
+
+    if tok.type != type {
+        fail("expected {type}, got {tok.type}")
+    }
+
+    for (key, val) in kwargs {
+        if tok.?{key} != val {
+            fail("expected {type}({key}={val}), got {tok}")
+        }
+    }
+
+    tok
+}
+
+fn eat(type, %kwargs) {
+    check(type, **kwargs)
+    lex.next()
+}
+
+const maps = %{}
+
+fn new-map-defs() {
+    let defs = []
+
+    for name, map in ctx.maps if name not in maps {
+        maps[name] = map
+        defs.push($$[let $$name = $${map}$$])
+    }
+
+    ty.Multi(defs)
+}
+
+fn eat-path() {
+    let path = ''
+
+    while _lex.peekc() != ':' {
+        path = "{path}{_lex.getc()}"
+    }
+
+    path
+}
+
+pub macro trace {
+    eat(':')
+    let kind = eat('id').id;
+    eat(':')
+    let name = eat('id').id;
+    let ast = parse.stmt()
+    let prog = ctx.tracepoint(ast)
+    prog.attach(TraceEvent("{kind}/{name}"))
+    ty.Nil
+}
+
+pub macro uprobe {
+    eat(':')
+    let binary = eat-path()
+    dbg(binary)
+    eat(':')
+    let name = eat('id').id
+    let ast = parse.stmt()
+    let prog = ctx.kprobe(ast)
+    prog.attach(UprobeEvent("{binary.sub(/[\/.]/, '_')}_{name}", binary, name))
+    ty.Nil
+}
+
+pub macro interval {
+    eat(':')
+    let unit = if lex.peek().type == 'id' {
+        let unit = eat('id').id
+        eat(':')
+        unit
+    } else {
+        'ns'
+    }
+    let period = if lex.peek().type == 'float' {
+        eat('float').float
+    } else {
+        float(eat('int').int)
+    }
+    let period = iround(
+        match unit {
+            'ns' => period,
+            'us' => period * 1.0e3,
+            'ms' => period * 1.0e6,
+            's'  => period * 1.0e9,
+            'm'  => period * 60.0e9,
+            'h'  => period * 3600.0e9,
+            'hz' => 1.0e9 / period,
+            _    => throw RuntimeError("unknown time unit: {unit}")
+        }
+    )
+    let ast = parse.stmt()
+    let prog = ctx.perf-event(ast)
+    prog.attach(IntervalEvent(period))
+    ty.Nil
+}
+
+pub macro END {
+    let block = parse.stmt()
+    $$[
+        $$::(end) = fn () {
+            let defs = [
+                $$[let $$name = $${val}$$]
+                for name, val in $$::(ctx).maps
+            ]
+            let prog = $${ty.Multi}([*defs, $${block}])
+            __eval__($$[
+                (fn () { $$prog })()
+            $$])
+        }
+    $$]
+}
+
+onExit(fn () {
+    debug!('------------------------ EXIT ------------------------')
+    ctx.run()
+    if end != nil {
+        end()
+    }
+})
