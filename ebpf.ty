@@ -89,17 +89,17 @@ C! struct perf_event_attr {
     __u16 __reserved_2;
 };
 
-use CType = {
+use CDecl = {
     ?ident: String | nil,
     ?name: String | nil,
     ?const?: Bool,
     ?volatile?: Bool,
     ?restrict?: Bool,
-    ?pointee: CType | nil,
+    ?pointee: CDecl | nil,
     ?count: Int | nil
 }
 
-fn c-parse(field: String) -> CType {
+fn c-parse(field: String) -> CDecl {
     const token = /(\s+|\*|\[\d*\]|struct \w+)/
     const qualifiers = ['const', 'volatile', 'restrict']
 
@@ -130,7 +130,7 @@ fn c-parse(field: String) -> CType {
 
     (const?, volatile?, restrict?) = get-qualifiers(const?, volatile?, restrict?)
 
-    fn go(t0: CType) -> CType {
+    fn go(t0: CDecl) -> CDecl {
         if #parts == 0 {
             return t0
         }
@@ -638,7 +638,7 @@ let c-type-map = %{
     'umode_t': U32
 }
 
-fn c-to-bpf(t: CType) -> BpfType {
+fn c-to-bpf(t: CDecl) -> BpfType {
     match t {
         {pointee: $t, *} => UserPtr(c-to-bpf(t)),
 
@@ -655,7 +655,7 @@ fn c-to-bpf(t: CType) -> BpfType {
     }
 }
 
-fn ffi-to-bpf(type: CType[Any]) -> BpfType {
+fn ffi-to-bpf(type: CDecl[Any]) -> BpfType {
     match type {
         c.char  => I8,
         c.u8    => U8,

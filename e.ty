@@ -1,24 +1,120 @@
 import atomic
 import ffi as c
+import ptr (typed)
 import os (..)
 import time
+import chalk (chalk)
+import path (Path)
+import io
+import sh (sh)
 
 import ebpf (..)
+import dwarf
+
+fn label(n) {
+    return [
+        '0-1',
+        '2-3',
+        '4-7',
+        '8-15',
+        '16-31',
+        '32-63',
+        '64-127',
+        '128-255',
+        '256-511',
+        '512-1K',
+        '1K-2K',
+        '2K-4K',
+        '4K-8K',
+        '8K-16K',
+        '16K-32K',
+        '32K-64K',
+        '64K-128K',
+        '128K-256K',
+        '256K-512K',
+        '512K-1M',
+        '1M-2M',
+        '2M-4M',
+        '4M-8M',
+        '8M-16M',
+        '16M-32M',
+        '32M-64M',
+        '64M-128M',
+        '128M-256M',
+        '256M-512M',
+        '512M-1G',
+        '1G-2G',
+        '2G-4G',
+        '4G-8G',
+        '8G-16G',
+        '16G-32G',
+        '32G-64G',
+        '64G-128G',
+        '128G-256G',
+        '256G-512G',
+        '512G-1T',
+        '>1T'
+    ][n]
+}
+
+fn hist(buf: Blob) {
+    let p = typed(buf.ptr(), c.u64)
+    [p[it] for ..64]
+}
+
+fn comm(key: Blob) {
+    if let $i = key.search(0) {
+        key.str(0, i)
+    } else {
+        key.str()
+    }
+}
+
+fn quote(arg: String) -> String {
+    if arg.match?(/[ "'\\]/) {
+        arg = arg.sub('\\', '\\\\')
+        arg = arg.sub('"', '\\"')
+        "\"{arg}\""
+    } else {
+        arg
+    }
+}
+
+fn histogram(key, val) {
+    let lo = 0
+    let hi = val.searchr-by(\_ > 0)
+    let total = val.sum()
+    print(chalk"\\[\n{key}\n\\]: [bright cyan]{val}[/]")
+    for i in lo...hi {
+        let [a, ?b] = label(i).split('-')
+        let label = "[{"{a},":<5} {b ?? '...':>5})"
+        let count = val[i]
+        let width = iround(count * 40.0 / total)
+        let bar   = "|{('@' * width).rpad(40)}|"
+        print(chalk"    [bright b yellow]{label:-10}[/]  [bright cyan]{count:8}[/]  [bright blue]{bar}[/]")
+    }
+}
 
 fn go() {
     let ctx = BpfContext()
-    let writes = ctx.hash('writes',  16, U64,      256)
-    let opens  = ctx.hash('opens',   8,  Str(128), 256)
-    let files  = ctx.hash('files',   16, Str(128), 256)
 
-    let prog1 = ctx.prog($$[
+    let writes = ctx.hash('writes',  16, U64,      256)
+    let opens  = ctx.hash('opens',    8, Str(128), 256)
+    let files  = ctx.hash('files',   16, Str(128), 256)
+    let mmaps  = ctx.hash('mmaps',   16, Str(512))
+    let reads  = ctx.hash('reads',    8, Record([I64, U64]),      256)
+    let starts = ctx.hash('starts',   8, U64,      256)
+    let counts = ctx.hash('counts',   8, U64,      256)
+    let times  = ctx.hash('times',  128, U64,      256)
+
+    let prog1 = ctx.tracepoint($$[
         let argv = ctx.argv
         let i = 0
 
-        print("({g_n}) {tai()} {comm:-12} {tgid:-6} {pid:-6}  ")
+        print("{tai()} {comm:-12} {tgid:-6} {pid:-6}  ")
 
         while argv[i] {
-            print(" {argv[i]}")
+            print(" {argv[i]:[quote]}")
             i = i + 1
         }
 
@@ -27,7 +123,7 @@ fn go() {
         print("\n")
     $$])
 
-    let prog2 = ctx.prog($$[
+    let prog2 = ctx.tracepoint($$[
         g_n = g_n + 1
         t_n = t_n + 1
         g_i = g_i + 1
@@ -37,7 +133,7 @@ fn go() {
         }
     $$])
 
-    let prog3 = ctx.prog($$[
+    let prog3 = ctx.tracepoint($$[
         g_n = g_n + 1
         t_n = t_n + 1
         g_i = g_i + 1
@@ -48,17 +144,28 @@ fn go() {
         }
     $$])
 
-    let prog4 = ctx.prog($$[
+    let prog4 = ctx.tracepoint($$[
         starts[pid] = now()
     $$])
 
-    let prog5 = ctx.prog($$[
+    let prog5 = ctx.tracepoint($$[
         opens[pid] = ctx.filename
     $$])
 
-    let prog6 = ctx.prog($$[
+    let prog6 = ctx.tracepoint($$[
         files[(tgid, ctx.ret)] = opens[pid]
-        print("{comm}: open({opens[pid]}) -> fd={ctx.ret}\n")
+        //print("{comm}: open({opens[pid]}) -> fd={ctx.ret}\n")
+    $$])
+
+    let prog7 = ctx.tracepoint($$[
+        reads[pid] = (ctx.fd, now())
+    $$])
+
+    let prog8 = ctx.tracepoint($$[
+        if comm == 'python' {
+            print("{comm2}: open(): fd={ctx.ret}\n")
+            counts[ustack()] = sum(1)
+        }
     $$])
 
     let enter-write   = TraceEvent('syscalls/sys_enter_write')
@@ -66,11 +173,23 @@ fn go() {
     let enter-execve  = TraceEvent('syscalls/sys_enter_execve')
     let enter-open    = TraceEvent('syscalls/sys_enter_openat')
     let exit-open     = TraceEvent('syscalls/sys_exit_openat')
+    let enter-mmap    = TraceEvent('syscalls/sys_enter_mmap')
+    let enter-read    = TraceEvent('syscalls/sys_enter_read')
+    let exit-read     = TraceEvent('syscalls/sys_exit_read')
 
-    prog5.trace(enter-open)
-    prog6.trace(exit-open)
+    signal(SIGINT, () -> do { throw RuntimeError('interrupted') })
 
-    let progs = [prog5, prog6]
+    let uprobe = UprobeEvent('my_probe1', 'libc', 'malloc')
+
+    //prog1.trace(enter-execve)
+    //prog5.trace(enter-open)
+    //prog6.trace(exit-open)
+    //prog7.trace(enter-read)
+    prog8.trace(exit-open)
+
+    //let progs = [prog5, prog6]
+    let progs = [prog8]
+    //let progs = [prog5, prog6, prog7, prog8]
 
     for progs {
         it.compile()
@@ -79,19 +198,25 @@ fn go() {
         it.load()
     }
 
+    Path('./out').write(prog8.asm.dis)
+
     let buffers = %{*: Blob()}
     let last-cleanup = time.now()
 
-    //printf('\nN   %-20s %-12s %-6s  %s\n', 'TIME', 'COMM', 'TGID', 'PID', 'ARGS')
+    printf('\n%-20s %-12s %-6s  %s\n', 'TIME', 'COMM', 'TGID', 'PID', 'ARGS')
 
     let stop = false
-    let sigint = () -> do { stop = true; }
 
-    signal(SIGINT, sigint)
+    signal(SIGINT, () -> do { stop = true; })
+
+    let cache = %{}
 
     while !stop {
+        while let Some((pid, maps)) = ctx.proc-maps.try-take() {
+            cache[pid] = maps
+        }
         for prog in progs {
-            while let $data = prog.out.try-read() {
+            while let $data = prog.out.try-read() and !stop {
                 //print("data: {#data} bytes")
                 //print("      {["{c:02x}" for c in data].unwords()}")
 
@@ -108,9 +233,7 @@ fn go() {
 
                 for spec in specs {
                     match spec {
-                        {type: $t, fmt, *} => {
-                            let str? = false
-
+                        {type: $t, fmt, fun, *} => {
                             let value = match t {
                                 U8  => c.load(c.u8, ptr),
                                 I8  => c.load(c.i8, ptr),
@@ -121,19 +244,17 @@ fn go() {
                                 U64 => c.load(c.u64, ptr),
                                 I64 => c.load(c.i64, ptr),
 
-                                Time64 => Moment(c.load(c.u64, ptr) / 1e9),
+                                Time64 => Moment(c.load(c.u64, ptr) / 1.0e9),
 
-                                AnyPtr(I8) or Str(_) => do {
-                                    str? = true
-                                    c.as_str(ptr)
-                                },
+                                AnyPtr(I8 or Str(_)) or Str(_) => c.as_str(ptr),
 
                                 _   => throw RuntimeError("unsupported type in print spec: {t}")
                             }
 
-                            buf.push(fmt ? "{value:{fmt}}" : "{value}")
+                            let text  = fmt ? "{value:{fmt}}" : "{value}"
+                            buf.push(fun ? fun(text) : text)
 
-                            ptr += str? ? (value.size() + 1) : size-of(t)
+                            ptr += (value :: String) ? (value.size() + 1) : size-of(t)
                         },
 
                         (s: String) => buf.push(s)
@@ -146,28 +267,45 @@ fn go() {
                 }
             }
         }
-
-        if (time.now() - last-cleanup) > 3.0 {
-            let obsolete = %{}
-
-            for tid, buf in buffers {
-                if #buf == 0 {
-                    obsolete << tid
-                }
-            }
-
-            buffers -= obsolete
-
+        if (time.now() - last-cleanup) > 1.0 {
+            buffers.keep!((_, buf) -> #buf != 0)
             last-cleanup = time.now()
         }
-
-        sleep(0.01)
+        sleep(0.001)
     }
 
-    //print(["{k:16}: {v/1.0e6 : .2}ms" for (k, v) in writes.dump-all()].unlines())
+    for progs {
+        it.unload()
+    }
+
     print()
-    pp(opens.dump())
-    pp(files.dump())
+
+    let profile = [(c.load(c.u64, key), c.load(c.u64, val)) for (key, val) in counts.dump()]
+    let ctxs    = %{pid: dwarf::Context(maps) for pid, maps in cache}
+
+    fn resolve(addrs: Array[Int], pid: Int) -> Array[String | chalk::Text] {
+        addrs.map(ip -> ctxs[pid].?resolve(ip)).map(match {
+            (name, (file, line, col)) => chalk"[bright green]{name:32}[/] "
+                                              "[blue]at[/] [bright yellow]{file}[/]"
+                                              "[bright magenta]:{line}:{col}[/]",
+            (name, nil)               => chalk"[bright green]{name:32}[/] "
+                                              "[blue]at[/] [#888]<unknown>[/]",
+            nil                       => chalk"[bright red]{'??':32}[/] [blue]at[/] [#888]<unknown>[/]"
+        })
+    }
+
+    for (key, val) in profile {
+        let stackid = key >> 32
+        let pid     = key & 0xFFFFFFFF
+
+        if not let $trace = prog8.stacks[stackid] or val <= 0 {
+            continue
+        }
+
+        let trace = resolve(trace, pid).map(\"    {_}").unlines()
+
+        print(chalk"\\[\n{trace}\n\\]: [bright cyan]{val}[/]")
+    }
 }
 
 go()
