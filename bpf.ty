@@ -1,6 +1,5 @@
 import ffi as c (C!)
 
-
 pub const off_t = c.long
 pub const size_t = c.ulong
 
@@ -966,7 +965,7 @@ pub const __aligned_u64 = c.ptr
 //  * ldimm64 rewrite:  address of map
 //  * verifier type:    CONST_PTR_TO_MAP
 //  */
-const BPF_PSEUDO_MAP_FD = 1
+pub const BPF_PSEUDO_MAP_FD = 1
 // #define BPF_PSEUDO_MAP_IDX	5
 //
 // /* insn[0].src_reg:  BPF_PSEUDO_MAP_[IDX_]VALUE
@@ -977,7 +976,7 @@ const BPF_PSEUDO_MAP_FD = 1
 //  * ldimm64 rewrite:  address of map[0]+offset
 //  * verifier type:    PTR_TO_MAP_VALUE
 //  */
-const BPF_PSEUDO_MAP_VALUE = 2
+pub const BPF_PSEUDO_MAP_VALUE = 2
 // #define BPF_PSEUDO_MAP_IDX_VALUE	6
 //
 // /* insn[0].src_reg:  BPF_PSEUDO_BTF_ID
@@ -1104,7 +1103,7 @@ enum! {
 // };
 //
 
-const BPF_OBJ_NAME_LEN = 16
+pub const BPF_OBJ_NAME_LEN = 16
 
 C! pub struct bpf_attr_map_create { /* anonymous struct used by BPF_MAP_CREATE command */
     __u32	map_type;	/* one of enum bpf_map_type */

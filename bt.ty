@@ -1,4 +1,6 @@
-import ffi as c
+#!/usr/bin/env ty
+
+import ffi as c (C!)
 import ptr (typed)
 import os (..)
 import time
@@ -10,11 +12,13 @@ import ty.parse as parse
 import ty.token as lex
 import ty.lex as _lex
 import log (..)
+import clap (clap!)
 
 import ebpf (..)
-import dwarf
 
-const ctx = BpfContext()
+C! fn { void _exit(int); }
+
+pub const ctx = BpfContext()
 let   end = nil
 
 fn comm(key: Blob) {
@@ -25,7 +29,7 @@ fn comm(key: Blob) {
     }
 }
 
-fn quote(arg: String) -> String {
+pub fn quote(arg: String) -> String {
     if arg.match?(/[ "'\\]/) {
         arg = arg.sub('\\', '\\\\')
         arg = arg.sub('"', '\\"')
@@ -46,7 +50,7 @@ fn check(type, %kwargs) {
         fail("expected {type}, got {tok.type}")
     }
 
-    for (key, val) in kwargs {
+    for key, val in kwargs {
         if tok.?{key} != val {
             fail("expected {type}({key}={val}), got {tok}")
         }
@@ -83,26 +87,144 @@ fn eat-path() {
     path
 }
 
+fn eat-sym() {
+    let sym = ''
+    let depth = 0
+
+    while true {
+        let c = _lex.peekc()
+        if c == '(' { depth += 1 }
+        if c == ')' && depth > 0 { depth -= 1; sym = "{sym}{_lex.getc()}"; continue }
+        if depth == 0 && c in ['+', ' ', '\t', '\n', '\r', nil] { break }
+        sym = "{sym}{_lex.getc()}"
+    }
+
+    sym
+}
+
+fn eat-filter() {
+    while _lex.peekc() in [' ', '\t'] { _lex.getc() }
+    if _lex.peekc() == '/' {
+        _lex.getc()
+        let s = ''
+        while _lex.peekc() != '/' && _lex.peekc() != nil {
+            s = "{s}{_lex.getc()}"
+        }
+        if _lex.peekc() == '/' { _lex.getc() }
+        parse.source(s)
+    } else {
+        nil
+    }
+}
+
+fn wrap-filter(filter, body) {
+    if filter != nil {
+        ty.If([filter], body, nil)
+    } else {
+        body
+    }
+}
+
+fn glob-to-regex(pattern: String) -> Regex {
+    let re = '^'
+    let esc = false
+
+    for c in pattern {
+        if esc {
+            esc = false
+            re += match c {
+                /[*?[\]\\^$.+(){}|]/ => "\\{c}",
+                _ => c
+            }
+        } else if c == '\\' {
+            esc = true
+        } else {
+            re += match c {
+                '*' => '.*',
+                '?' => '.',
+                /[][\\^$.+(){}|?]/ => "\\{c}",
+                _ => c
+            }
+        }
+    }
+
+    regex("{re}$")
+}
+
 pub macro trace {
     eat(':')
-    let kind = eat('id').id;
+    let kind = eat('id').id
     eat(':')
-    let name = eat('id').id;
-    let ast = parse.stmt()
+    let name = eat-sym()
+    let func = if name.match?(/[*?]/) { glob-to-regex(name) } else { name }
+    let filter = eat-filter()
+    let ast = wrap-filter(filter, parse.stmt())
     let prog = ctx.tracepoint(ast)
-    prog.attach(TraceEvent("{kind}/{name}"))
+    for event in trace-events(kind, func) {
+        prog.attach(event)
+    }
     ty.Nil
 }
 
-pub macro uprobe {
+fn eat-int() {
+    let s = ''
+    while _lex.peekc() in ['0','1','2','3','4','5','6','7','8','9'] {
+        s = "{s}{_lex.getc()}"
+    }
+    int(s)
+}
+
+fn parse-uprobe() {
     eat(':')
     let binary = eat-path()
-    dbg(binary)
     eat(':')
-    let name = eat('id').id
-    let ast = parse.stmt()
+    let name = eat-sym()
+    let off = if _lex.peekc() == '+' { _lex.getc(); eat-int() } else { 0 }
+    let func = if name.match?(/[*?]/) { glob-to-regex(name) } else { name }
+    (binary, func, off)
+}
+
+pub macro uprobe {
+    let (binary, func, off) = parse-uprobe()
+    let filter = eat-filter()
+    let ast = wrap-filter(filter, parse.stmt())
     let prog = ctx.kprobe(ast)
-    prog.attach(UprobeEvent("{binary.sub(/[\/.]/, '_')}_{name}", binary, name))
+    for event in uprobe-events(binary, func, off, ctx.target-pid) {
+        prog.attach(event)
+    }
+    ty.Nil
+}
+
+pub macro uretprobe {
+    let (binary, func, off) = parse-uprobe()
+    let filter = eat-filter()
+    let ast = wrap-filter(filter, parse.stmt())
+    let prog = ctx.kprobe(ast)
+    for event in uretprobe-events(binary, func, off, ctx.target-pid) {
+        prog.attach(event)
+    }
+    ty.Nil
+}
+
+pub macro kprobe {
+    eat(':')
+    let name = eat-sym()
+    let filter = eat-filter()
+    let ast = wrap-filter(filter, parse.stmt())
+    let prog = ctx.kprobe(ast)
+    let event = kprobe-event(name)
+    prog.attach(event)
+    ty.Nil
+}
+
+pub macro kretprobe {
+    eat(':')
+    let name = eat-sym()
+    let filter = eat-filter()
+    let ast = wrap-filter(filter, parse.stmt())
+    let prog = ctx.kprobe(ast)
+    let event = kretprobe-event(name)
+    prog.attach(event)
     ty.Nil
 }
 
@@ -154,10 +276,42 @@ pub macro END {
     $$]
 }
 
-onExit(fn () {
-    debug!('------------------------ EXIT ------------------------')
-    ctx.run()
-    if end != nil {
-        end()
+/// bt.ty - a BPF tracing tool inspired by bpftrace, written in Ty.
+clap! Bt {
+    /// Stop after this many seconds
+    timeout: Float
+
+    /// Specify a program directly in the command line, e.g. `bt -e 'trace:kprobe:sys_write { printf("write called\\n") }'`
+    program: String, short: 'e', placeholder: 'PROGRAM'
+
+    /// Trace only the specified process
+    pid: Int, short: 'p'
+
+    /// Trace only processes whose comm contains this string
+    comm: String, short: 'c'
+}
+
+fn main() {
+    let (opts, args) = Bt.parse()
+
+    if let $pid = opts.pid {
+        ctx.target-pid = pid
     }
-})
+
+    if let $comm = opts.comm {
+        ctx.target-comm = comm
+    }
+
+    if let $prog = opts.program {
+        ty.parse(prog, resolve=true, scope=__scope__)
+    }
+
+    onExit(fn () {
+        ctx.run(opts.timeout)
+        if end != nil {
+            end()
+        }
+    })
+}
+
+main()

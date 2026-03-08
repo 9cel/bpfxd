@@ -11,6 +11,8 @@ if not let $libelf = c.open('elf') {
     throw RuntimeError('failed to load libelf')
 }
 
+let libstdcxx = c.open('stdc++', [6])
+
 const u8        = c.u8
 const pid_t     = c.u32
 const size_t    = c.u64
@@ -868,6 +870,20 @@ C! pub libdw fn {
 
 }
 
+C! pub libstdcxx fn {
+    char *__cxa_demangle (const char *mangled_name, char *output_buffer, size_t *length, int *status);
+}
+
+pub fn demangle(name: String) -> String | nil {
+    let status = c.box(c.i32)
+    let $result = __cxa_demangle(name, nil, nil, status) or return nil
+    defer {
+        c.free(result)
+        c.free(status)
+    }
+    c.str(result)
+}
+
 pub class Context {
     __callbacks: Dwfl_Callbacks
     __dwfl:      Ptr[_]
@@ -1011,7 +1027,8 @@ pub fn lookup(file: String, pattern: Regex) -> Array[(String, Int)] {
                 continue
             }
 
-            if c.as_str(name).match?(pattern) {
+            let name_str = c.as_str(name)
+            if name_str.match?(pattern) || (demangle(name_str) ?? '').match?(pattern) {
                 let offset = sym.st_value - bias
                 results.push((c.str(name), offset))
             }
@@ -1102,8 +1119,14 @@ pub fn lookup2(file: String, pattern: String | Regex) -> Array[(String, Int, Arr
                 continue
             }
 
-            if !is-match?(c.as_str(name)) {
-                continue
+            let name_str = c.as_str(name)
+            if !is-match?(name_str) {
+                if not let $demangled = demangle(name_str) {
+                    continue
+                }
+                if !is-match?(demangled) {
+                    continue
+                }
             }
 
             let offset = sym.st_value
@@ -1126,7 +1149,7 @@ pub fn lookup2(file: String, pattern: String | Regex) -> Array[(String, Int, Arr
     results
 }
 
-fn get_function_args(cu_die: Dwarf_Die, func_addr: Int) -> Array[(String, String)] {
+fn get_function_args(cu_die: IntoPtr[_], func_addr: Int) -> Array[(String, String)] {
     let args = []
     
     // Find the subprogram DIE for this address
@@ -1164,7 +1187,7 @@ fn get_function_args(cu_die: Dwarf_Die, func_addr: Int) -> Array[(String, String
     args
 }
 
-fn find_function_die(cu_die: Dwarf_Die, addr: Int) -> Dwarf_Die | nil {
+fn find_function_die(cu_die: IntoPtr[_], addr: Int) -> Dwarf_Die | nil {
     let child = Dwarf_Die()
     
     if dwarf_child(cu_die, child) != 0 {

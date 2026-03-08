@@ -14,6 +14,8 @@ import log (..)
 import pretty
 import ty.parse as parse
 
+C! fn { void _exit(int); }
+
 const TRACEFS_PATH = '/sys/kernel/debug/tracing'
 
 const RING_BUFFER_CAPACITY = (16  * 1024 * 1024)
@@ -103,7 +105,9 @@ fn c-parse(field: String) -> CDecl {
     const token = /(\s+|\*|\[\d*\]|struct \w+)/
     const qualifiers = ['const', 'volatile', 'restrict']
 
-    let parts = field.scan(/\*|struct \w+|unsigned \w+|\w+/).reverse()
+    let parts = field.scan(/\*|struct \w+|unsigned \w+|\w+/v)
+                     .map!(&[0 as Int])
+                     .reverse!()
 
     fn get-qualifiers(
         const?: Bool = false,
@@ -159,6 +163,35 @@ class Moment {
 
     __str__() -> String {
         __fmt__("%Y-%m-%d %H:%M:%S")
+    }
+}
+
+class Duration {
+    __dt: Float
+
+    init(dt: Float | Int) {
+        __dt = float(dt)
+    }
+
+    __fmt__(spec: String) -> String {
+        __dt.__fmt__(spec)
+    }
+
+    __str__() -> String {
+        if __dt < 1000.0 {
+            "{__dt:.0} nsec"
+        } else if __dt < 1.0e6 {
+            "{__dt / 1.0e3:.3} us"
+        } else if __dt < 1.0e9 {
+            "{__dt / 1.0e6:.3} ms"
+        } else {
+            "{__dt / 1.0e9:.3} s"
+
+        }
+    }
+
+    __pretty__*() {
+        yield pretty::Raw(chalk"[bright blue]{self}[/]")
     }
 }
 
@@ -378,7 +411,7 @@ class BpfAssembler {
         BpfJump(self, #__prog - 8, #self - 1, __label++)
     }
 
-    jmp64(imm: Int = 0, to: (Int, Int) = nil) -> BpfJump {
+    jmp64(imm: Int = 0, to: (Int, Int) = nil) {
         match to {
             (pos, id) => {
                 __d("jmp L{id}")
@@ -410,6 +443,11 @@ class BpfAssembler {
     jgt64(dst: Int, imm: Int = 0) -> BpfJump {
         __d("jmp L{__label} if r{dst} > {imm}")
         __jmp(BPF_JGT | BPF_K, dst, 0, 0, imm)
+    }
+
+    jlt64(dst: Int, imm: Int = 0) -> BpfJump {
+        __d("jmp L{__label} if r{dst} < {imm}")
+        __jmp(BPF_JLT | BPF_K, dst, 0, 0, imm)
     }
 
     jsgt64(dst: Int, imm: Int = 0) -> BpfJump {
@@ -517,6 +555,11 @@ class BpfAssembler {
         __emit(BPF_STX | BPF_ATOMIC | BPF_DW, dst, src, 0, BPF_ADD | BPF_FETCH)
     }
 
+    cmpxchg(dst: Int, src: Int) {
+        __d("*(atomic u64 *)r{dst} cmpxchg r{src}")
+        __emit(BPF_STX | BPF_ATOMIC | BPF_DW, dst, src, 0, BPF_CMPXCHG)
+    }
+
     note(text: _) {
         __dis.push(str(chalk"[#777]// {text}[/]\n"))
     }
@@ -530,29 +573,39 @@ class BpfAssembler {
     }
 }
 
-tag UnknownPtr, MapPtr, KernelPtr, UserPtr, StackPtr;
-tag U8, U16, U32, U64;
-tag I8, I16, I32, I64;
-tag Str;
-tag Time64;
-tag Struct;
-tag Record;
-tag RingBuffer;
-tag BloomFilter;
-tag Histogram;
-tag UStack;
-tag KStack;
-tag MapRef;
-tag Hash;
-tag StackMap;
-tag UnknownType;
-tag Unit;
-tag Const;
+pub tag UnknownPtr, MapPtr, KernelPtr, UserPtr, StackPtr;
+pub tag U8, U16, U32, U64;
+pub tag I8, I16, I32, I64;
+pub tag Str;
+pub tag Time64;
+pub tag Duration64;
+pub tag Struct;
+pub tag Record;
+pub tag RingBuffer;
+pub tag BloomFilter;
+pub tag Histogram;
+pub tag Avg;
+pub tag LinearHistogram;
+pub tag UStack;
+pub tag KStack;
+pub tag MapRef;
+pub tag Hash;
+pub tag StackMap;
+pub tag UnknownType;
+pub tag Unit;
+pub tag Const;
 
 macro AnyMap = RingBuffer or BloomFilter or StackMap or Hash(_, _)
 macro AnyPtr(t) = UnknownPtr($$t) or MapPtr($$t) or KernelPtr($$t) or UserPtr($$t) or StackPtr($$t, _)
 macro AnyInt = U8 or U16 or U32 or U64 or I8 or I16 or I32 or I64 or Const(_)
 use match StringLike = AnyPtr(I8 or Str(_)) or Str(_) => ()
+
+pub ns map {
+    trait BpfMap {
+        fd      -> Int;
+        value() -> Any;
+    }
+}
 
 use BpfType =
     UnknownPtr[BpfType]
@@ -566,6 +619,7 @@ use BpfType =
   | UStack
   | KStack
   | Histogram
+  | LinearHistogram[(Int, Int, Int)]
   | Hash[(BpfType, BpfType)]
   | MapRef[map.BpfMap]
   | U8
@@ -577,7 +631,9 @@ use BpfType =
   | I32
   | I64
   | Time64
+  | Duration64
   | Const[Int]
+  | Avg[BpfType]
   | Record[Array[BpfType]]
   | Struct[Dict[String, (Int, BpfType)]]
   | Str[Int]
@@ -607,6 +663,8 @@ pub fn size-of(t: BpfType) -> Int {
         Const(_)    => 0,
         Str(n)      => n,
         Histogram   => 512,
+        Avg(_)      => 16,
+        LinearHistogram((lo, hi, step)) => ((hi - lo) / step + 1) * 8,
         UStack      => 8,
         KStack      => 8,
         MapRef(_)   => 0,
@@ -638,7 +696,7 @@ let c-type-map = %{
     'umode_t': U32
 }
 
-fn c-to-bpf(t: CDecl) -> BpfType {
+fn c-to-bpf(t: CDecl) {
     match t {
         {pointee: $t, *} => UserPtr(c-to-bpf(t)),
 
@@ -646,8 +704,7 @@ fn c-to-bpf(t: CDecl) -> BpfType {
             if let $bpf-type = c-type-map[name] {
                 bpf-type
             } else {
-                return UnknownType
-                throw BpfError("unsupported C type name: {name}")
+                UnknownType
             }
         },
 
@@ -655,7 +712,7 @@ fn c-to-bpf(t: CDecl) -> BpfType {
     }
 }
 
-fn ffi-to-bpf(type: CDecl[Any]) -> BpfType {
+fn ffi-to-bpf(type) {
     match type {
         c.char  => I8,
         c.u8    => U8,
@@ -675,7 +732,7 @@ fn ffi-to-bpf(type: CDecl[Any]) -> BpfType {
     }
 }
 
-fn ty-to-bpf(t: AST) -> BpfType {
+fn ty-to-bpf(t: _) {
     match t {
         ty.Id({name, *}) => {
             match name {
@@ -762,7 +819,7 @@ fn ctx-arg-type(decl: String) -> (String | nil, BpfType) {
     }
 }
 
-fn deref-ptr-type(t0: BpfType) -> BpfType {
+fn deref-ptr-type(t0: BpfType) {
     match t0 {
         Str(_)     => t0,
         StringLike => Str(128),
@@ -777,7 +834,7 @@ class Var : Slot {
     __off:  Int
     __name: String
     __prog: BpfProgram
-    type:   BpfType
+    type:   _
     map:    _
 
     init(name: String, off: Int, prog: BpfProgram) {
@@ -835,7 +892,7 @@ class Var : Slot {
 }
 
 use Expr = {
-    ast: AST
+    ast: _
     type: BpfType
 }
 
@@ -1089,11 +1146,126 @@ class StackAllocator {
     }
 }
 
+fn __map-to-bpftype(m: _) {
+    if type(m) == map.Hash {
+        Hash(m.key-type, m.value-type)
+    } else if type(m) == map.Array {
+        MapPtr(U8)
+    } else if type(m) == map.PerCPUArray {
+        I64
+    } else if type(m) == map.RingBuffer {
+        RingBuffer
+    } else {
+        throw BpfError("unsupported map type for global: {m}")
+    }
+}
+
+// Pass 1: Convert SpecialString format specs from SpecialString to String.
+fn __fixup-fmtspecs(node: _) -> _ {
+    match node {
+        ty.Block($xs)  => ty.Block([__fixup-fmtspecs(x) for x in xs]),
+        ty.Multi($xs)  => ty.Multi([__fixup-fmtspecs(x) for x in xs]),
+        ty.If(conds, a, b) => ty.If(
+            [__fixup-fmtspecs(c) for c in conds],
+            __fixup-fmtspecs(a),
+            __fixup-fmtspecs(b)
+        ),
+        ty.Call({func: ty.Id({name: 'print', *}), args: [ty.Arg({arg, *})], *}) =>
+            match arg {
+                ty.SpecialString(_) => ty.Call(
+                    func: ty.Id(name: 'print'),
+                    args: [ty.Arg(arg: __fixup-fmtspecs(arg))]
+                ),
+                _ => __fixup-fmtspecs(ty.Call(
+                    func: ty.Id(name: 'print'),
+                    args: [ty.Arg(arg: ty.SpecialString([(arg, nil, nil, nil), '\n']))]
+                ))
+            },
+        ty.Call($call) => ty.Call(
+            func: __fixup-fmtspecs(call.func),
+            args: [__fixup-fmtspecs(a) for a in call.args]
+        ),
+        ty.Arg($arg) => ty.Arg(
+            arg: __fixup-fmtspecs(arg.arg),
+            cond: if arg.?cond != nil { __fixup-fmtspecs(arg.cond) } else { nil },
+            name: arg.?name
+        ),
+        ty.Assign($a, $b) => ty.Assign(__fixup-fmtspecs(a), __fixup-fmtspecs(b)),
+        ty.Let($a, $b)    => ty.Let(__fixup-fmtspecs(a), __fixup-fmtspecs(b)),
+        ty.While([$cond], body) => ty.While([__fixup-fmtspecs(cond)], __fixup-fmtspecs(body)),
+        ty.Cond(cond, a, b) => ty.Cond(__fixup-fmtspecs(cond), __fixup-fmtspecs(a), __fixup-fmtspecs(b)),
+        ty.SpecialString($elems) => do {
+            let result = []
+            for e in elems {
+                let e = __fixup-fmtspecs(e)
+                if type(e) != String && #e == 4 {
+                    match e[1] {
+                        ty.SpecialString([$s]) => result.push((e[0], ty.String(s), e[2], e[3])),
+                        _                      => result.push(e)
+                    }
+                } else {
+                    result.push(e)
+                }
+            }
+            ty.SpecialString(result)
+        },
+        _ => node
+    }
+}
+
+// Pass 2: Extract format specs into fmts array for runtime use.
+fn __fixup-extract(node: _, fmts) -> _ {
+    match node {
+        ty.Block($xs)  => ty.Block([__fixup-extract(x, fmts) for x in xs]),
+        ty.Multi($xs)  => ty.Multi([__fixup-extract(x, fmts) for x in xs]),
+        ty.If(conds, a, b) => ty.If(
+            [__fixup-extract(c, fmts) for c in conds],
+            __fixup-extract(a, fmts),
+            __fixup-extract(b, fmts)
+        ),
+        ty.Call($call) => ty.Call(
+            func: __fixup-extract(call.func, fmts),
+            args: [__fixup-extract(a, fmts) for a in call.args]
+        ),
+        ty.Arg($arg) => ty.Arg(
+            arg: __fixup-extract(arg.arg, fmts),
+            cond: if arg.?cond != nil { __fixup-extract(arg.cond, fmts) } else { nil },
+            name: arg.?name
+        ),
+        ty.Assign($a, $b) => ty.Assign(__fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+        ty.Let($a, $b)    => ty.Let(__fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+        ty.While([$cond], body) => ty.While([__fixup-extract(cond, fmts)], __fixup-extract(body, fmts)),
+        ty.Cond(cond, a, b) => ty.Cond(__fixup-extract(cond, fmts), __fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+        ty.SpecialString($elems) => do {
+            let walked = [__fixup-extract(e, fmts) for e in elems]
+            let new-elems = [(nil, nil, #fmts, nil)]
+            let key = []
+            for e in walked {
+                if type(e) != String && #e == 4 {
+                    let fmt = match e[1] { ty.String($s) => s, _ => nil }
+                    new-elems.push((e[0], nil, e[2], e[3]))
+                    key.push({
+                        fmt,
+                        width: e[2],
+                        type: nil,
+                        fun: if e[3] != nil { ty.eval(e[3]) } else { nil }
+                    })
+                } else {
+                    key.push(e)
+                }
+            }
+            fmts.push(key)
+            ty.SpecialString(new-elems)
+        },
+        _ => node
+    }
+}
+
 pub class BpfProgram {
     __context:      BpfContext
     __type:         Int
     __tracing:      Array[EventHandle]
-    __ast:          AST
+    __ast:          _
     __asm:          BpfAssembler
     __fd:           Int
     __env:          Dict[String, Var]
@@ -1109,7 +1281,7 @@ pub class BpfProgram {
 
     strings { __fmts }
 
-    init(type: Int, ast: AST, context: BpfContext) {
+    init(type: Int, ast: _, context: BpfContext) {
         __context = context
         __type = type
         __ast = ast
@@ -1202,13 +1374,7 @@ pub class BpfProgram {
             let var = Var(name, __var-off, self)
 
             if let $m = __context.maps[name] {
-                var.type = match type(m) {
-                    map.Array         => MapPtr(U8),
-                    map.PerCPUArray   => I64,
-                    map.Hash          => Hash(m.key-type, m.value-type),
-                    map.RingBuffer    => RingBuffer,
-                    _                 => throw BpfError("unsupported map type for global: {name}")
-                }
+                var.type = __map-to-bpftype(m)
                 var.map = m
             } else if name.starts?('g_') {
                 var.type = U64
@@ -1242,9 +1408,13 @@ pub class BpfProgram {
             U8  or I8  => __asm.ldx8(dst, base, off),
             U16 or I16 => __asm.ldx16(dst, base, off),
             U32 or I32 => __asm.ldx32(dst, base, off),
-            U64 or I64 => __asm.ldx64(dst, base, off),
-            AnyPtr(_)  => __asm.ldx64(dst, base, off),
+
+            U64, I64,
+            AnyPtr(_),
+            Time64,
+            Duration64,
             AnyMap     => __asm.ldx64(dst, base, off),
+
             Str(_) or Record(_) => do {
                 __asm.mov64(dst, base);
                 if off != 0 {
@@ -1265,6 +1435,8 @@ pub class BpfProgram {
             U16 or I16 => __asm.stx16(base, src, off),
             U32 or I32 => __asm.stx32(base, src, off),
             U64 or I64 => __asm.stx64(base, src, off),
+            Time64     => __asm.stx64(base, src, off),
+            Duration64 => __asm.stx64(base, src, off),
             AnyPtr(_) or Str(_) or Record(_) => __asm.stx64(base, src, off),
             _   => throw BpfError("unsupported type for store: {t}")
         }
@@ -1297,7 +1469,7 @@ pub class BpfProgram {
         }
     }
 
-    __load-var(var: String | Var, dst: Int, deref?: Bool = true) -> Slot {
+    __load-var(var: String | Var, dst: Int, deref?: Bool = true) {
         let var = (var :: String) ? __var(var) : var
         __asm.note("load var: {deref? ? '' : '&'}{var.name} -> r{dst}")
         if var.map :: map.PerCPUArray {
@@ -1330,11 +1502,11 @@ pub class BpfProgram {
         }
     }
 
-    __jump-if(cond: AST) -> BpfJump {
+    __jump-if(cond: _) -> BpfJump {
         __jump-if-not(ty.Not(cond))
     }
 
-    __jump-if-not(cond: AST) -> BpfJump {
+    __jump-if-not(cond: _) -> BpfJump {
         match cond {
             ty.Eq(a, ty.String(b)) => do {
                 let n = match __analyze(a) {
@@ -1370,6 +1542,14 @@ pub class BpfProgram {
                 __load-string(b, r3)
                 __asm.call(helper.strncmp)
                 __asm.jeq64(r0, 0)
+            },
+
+            ty.NotEq(a, b) => do {
+                let ^_a = __emit(a).spill()
+                let ^_b = __emit(b).spill()
+                _a.load(r0)
+                _b.load(r1)
+                __asm.jeq64x(r0, r1)
             },
 
             ty.GT(a, b) => do {
@@ -1435,7 +1615,7 @@ pub class BpfProgram {
         __loop-depth -= 1
     }
 
-    __analyze-lvalue(lvalue: AST, t0: BpfType = nil) {
+    __analyze-lvalue(lvalue: _, t0: BpfType = nil) {
         match lvalue {
             ty.Id({name, ?constraint, *}) => {
                 let var = __var(name)
@@ -1511,7 +1691,7 @@ pub class BpfProgram {
         }
     }
 
-    __int-promote(t0: BpfType, t1: BpfType) -> BpfType {
+    __int-promote(t0, t1) {
         match (signed?(t0) || signed?(t1), max(size-of(t0), size-of(t1))) {
             (true,  8) => I64,
             (true,  4) => I32,
@@ -1524,7 +1704,7 @@ pub class BpfProgram {
         }
     }
 
-    __analyze(expr: AST) -> BpfType {
+    __analyze(expr: _) -> BpfType {
         match expr {
             ty.Id({name, *}) => {
                 __var(name).type
@@ -1570,11 +1750,23 @@ pub class BpfProgram {
                 })
 
                 match name {
-                    'now'    => I64,
+                    'now'    => Time64,
                     'tai'    => Time64,
                     'print'  => Unit,
                     'hist'   => Histogram,
+                    'lhist'  => match arg-types {
+                        [_, Const(lo), Const(hi), Const(step)] => LinearHistogram((lo, hi, step)),
+                        _ => throw BpfError("lhist() requires (value, min, max, step) with constant min/max/step")
+                    },
                     'sum'    => U64,
+                    'count'  => U64,
+                    'min'    => U64,
+                    'max'    => U64,
+                    'avg'  => match arg-types {
+                        [t0] => Avg(t0),
+                        _ => throw BpfError("avg() requires exactly one argument")
+                    },
+                    'delete' => Unit,
                     'len'    => U64,
                     'ustack' => do {
                         __var('__pidq')
@@ -1628,6 +1820,7 @@ pub class BpfProgram {
                     (Const(a), Const(b))       => Const(a + b),
                     (StackPtr(t, n), Const(k)) => StackPtr(t, n + k),
                     (AnyInt, AnyInt)           => __int-promote(t0, t1),
+                    (Duration64, Duration64)   => Duration64,
                     (AnyPtr(_), AnyInt)        => t0,
                     _ => throw BpfError("unsupported types for Add: {t0}, {t1}")
                 }
@@ -1640,6 +1833,7 @@ pub class BpfProgram {
                     (Const(a), Const(b))       => Const(a - b),
                     (StackPtr(t, n), Const(k)) => StackPtr(t, n - k),
                     (AnyInt, AnyInt)           => __int-promote(t0, t1),
+                    (Time64, Time64)           => Duration64,
                     (AnyPtr(_), AnyInt)        => t0,
                     _ => throw BpfError("unsupported types for Sub: {t0}, {t1}")
                 }
@@ -1733,7 +1927,7 @@ pub class BpfProgram {
             ty.SpecialString(parts) => {
                 for match parts {
                     ($expr, _, _, _) => __analyze(expr),
-                    _                => ()
+                    _                => nil
                 }
                 nil
             },
@@ -1766,7 +1960,7 @@ pub class BpfProgram {
         }
     }
 
-    __bop64(op: _, a: AST, b: AST) -> Slot {
+    __bop64(op: _, a: _, b: _) -> Slot {
         let ^_a = __emit(a).spill()
         let ^_b = __emit(b).spill()
 
@@ -1911,7 +2105,7 @@ pub class BpfProgram {
         _tmp
     }
 
-    __emit(expr: AST) -> Slot {
+    __emit(expr: _) -> Slot {
         catch error: BpfError {
             pp(expr)
             eprint("{error}\n{error.trace()}")
@@ -2109,8 +2303,49 @@ pub class BpfProgram {
                         }
                     },
 
+                    'delete' => {
+                        let arg = match args {
+                            [ty.Arg({arg: ty.Subscript(xs, idx), *})] => (xs, idx),
+                            _ => throw BpfError('delete() expects a map subscript, e.g. delete(map[key])')
+                        }
+                        let (xs, idx) = arg
+                        let xs0  = __analyze(xs)
+                        let idx0 = __analyze(idx)
+
+                        let sz = match xs0 {
+                            Hash(k0, _) => size-of(k0),
+                            _           => throw BpfError('delete() target must be a hash map')
+                        }
+
+                        let ^_idx = __emit(idx).spill()
+                        let ^_xs  = __emit(xs).spill()
+
+                        _xs.load(r1)
+                        let ^_ = __load-key(_idx, idx0, sz)
+                        __asm.mov64(r2, r0)
+                        _xs.load(r1)
+                        __asm.call(helper.map_delete_elem)
+
+                        EmptySlot()
+                    },
+
                     _ => throw BpfError("unknown function: {name}"),
                 }
+            },
+
+            // count(): sugar for sum(1)
+            ty.Assign(
+                ty.Subscript(xs, idx),
+                ty.Call({
+                    func: ty.Id({name: 'count', *}),
+                    args: [],
+                    *
+                })
+            ) => {
+                __emit(ty.Assign(
+                    ty.Subscript(xs, idx),
+                    ty.Call({func: ty.Id({name: 'sum'}), args: [ty.Arg({arg: ty.Int(1)})]})
+                ))
             },
 
             ty.Assign(
@@ -2171,6 +2406,184 @@ pub class BpfProgram {
                 RegZeroSlot(self)
             },
 
+            // min(value): track minimum value per key
+            ty.Assign(
+                ty.Subscript(xs, idx),
+                ty.Call({
+                    func: ty.Id({name: 'min', *}),
+                    args: [ty.Arg({arg: value, *})],
+                    *
+                })
+            ) => {
+                let xs0  = __analyze(xs)
+                let idx0 = __analyze(idx)
+
+                let sz = match xs0 {
+                    Hash(k0, _) => size-of(k0),
+                    _           => throw BpfError('min() target must be a hash map')
+                }
+
+                let ^_idx = __emit(idx).spill()
+                let ^_xs  = __emit(xs).spill()
+
+                __asm.note('load xs into r1')
+                _xs.load(r1)
+                let ^_ = __load-key(_idx, idx0, sz)
+                __asm.mov64(r7, r0)
+
+                // Ensure entry exists (initialized to 0)
+                __load-var('__zero', r3, deref?=false)
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.imov64(r4, BPF_NOEXIST)
+                __asm.call(helper.map_update_elem)
+
+                // Lookup pointer to value
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.call(helper.map_lookup_elem)
+
+                let jump = __asm.jne64(r0, 0)
+                __asm.exit()
+                jump.patch()
+
+                __asm.mov64(r8, r0)
+
+                // Emit new value
+                let ^_arg = __emit(value).spill()
+                _arg.load(r4)
+
+                // Load current value
+                __asm.ldx64(r5, r8, 0)
+
+                // If current == 0 (fresh entry) OR new < current, store new value
+                let store1 = __asm.jeq64(r5, 0)
+                let skip = __asm.jle64x(r5, r4)
+                store1.patch()
+                __asm.stx64(r8, r4, 0)
+                skip.patch()
+
+                RegZeroSlot(self)
+            },
+
+            // max(value): track maximum value per key
+            ty.Assign(
+                ty.Subscript(xs, idx),
+                ty.Call({
+                    func: ty.Id({name: 'max', *}),
+                    args: [ty.Arg({arg: value, *})],
+                    *
+                })
+            ) => {
+                let xs0  = __analyze(xs)
+                let idx0 = __analyze(idx)
+
+                let sz = match xs0 {
+                    Hash(k0, _) => size-of(k0),
+                    _           => throw BpfError('max() target must be a hash map')
+                }
+
+                let ^_idx = __emit(idx).spill()
+                let ^_xs  = __emit(xs).spill()
+
+                __asm.note('load xs into r1')
+                _xs.load(r1)
+                let ^_ = __load-key(_idx, idx0, sz)
+                __asm.mov64(r7, r0)
+
+                // Ensure entry exists (initialized to 0)
+                __load-var('__zero', r3, deref?=false)
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.imov64(r4, BPF_NOEXIST)
+                __asm.call(helper.map_update_elem)
+
+                // Lookup pointer to value
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.call(helper.map_lookup_elem)
+
+                let jump = __asm.jne64(r0, 0)
+                __asm.exit()
+                jump.patch()
+
+                __asm.mov64(r8, r0)
+
+                // Emit new value
+                let ^_arg = __emit(value).spill()
+                _arg.load(r4)
+
+                // Load current value
+                __asm.ldx64(r5, r8, 0)
+
+                // If new > current, store new value
+                let skip = __asm.jle64x(r4, r5)
+                __asm.stx64(r8, r4, 0)
+                skip.patch()
+
+                RegZeroSlot(self)
+            },
+
+            // avg(value): track running average per key (stores sum + count)
+            ty.Assign(
+                ty.Subscript(xs, idx),
+                ty.Call({
+                    func: ty.Id({name: 'avg', *}),
+                    args: [ty.Arg({arg: value, *})],
+                    *
+                })
+            ) => {
+                let xs0  = __analyze(xs)
+                let idx0 = __analyze(idx)
+
+                let sz = match xs0 {
+                    Hash(k0, _) => size-of(k0),
+                    _           => throw BpfError('avg() target must be a hash map')
+                }
+
+                let ^_idx = __emit(idx).spill()
+                let ^_xs  = __emit(xs).spill()
+
+                __asm.note('load xs into r1')
+                _xs.load(r1)
+                let ^_ = __load-key(_idx, idx0, sz)
+                __asm.mov64(r7, r0)
+
+                // Ensure entry exists (initialized to zeros: sum=0, count=0)
+                __load-var('__zero', r3, deref?=false)
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.imov64(r4, BPF_NOEXIST)
+                __asm.call(helper.map_update_elem)
+
+                // Lookup pointer to (sum, count) pair
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.call(helper.map_lookup_elem)
+
+                let jump = __asm.jne64(r0, 0)
+                __asm.exit()
+                jump.patch()
+
+                __asm.mov64(r8, r0)
+
+                // Emit new value
+                let ^_arg = __emit(value).spill()
+                _arg.load(r4)
+
+                // Atomic add value to sum (offset 0)
+                __asm.mov64(r0, r8)
+                __asm.fetch-add(r0, r4)
+
+                // Atomic add 1 to count (offset 8)
+                __asm.mov64(r0, r8)
+                __asm.add64i(r0, 8)
+                __asm.imov64(r1, 1)
+                __asm.fetch-add(r0, r1)
+
+                RegZeroSlot(self)
+            },
+
             ty.Assign(
                 ty.Subscript(xs, idx),
                 ty.Call({
@@ -2221,6 +2634,87 @@ pub class BpfProgram {
                 __asm.mov64(r0, r8)
                 __asm.imov64(r2, 0)
                 __asm.imul64i(r1, 8)
+                __asm.add64(r0, r1)
+                __asm.imov64(r1, 1)
+                __asm.fetch-add(r0, r1)
+                __asm.mov64(r0, r1)
+
+                RegZeroSlot(self)
+            },
+
+            // lhist(value, min, max, step): linear histogram per key
+            ty.Assign(
+                ty.Subscript(xs, idx),
+                ty.Call({
+                    func: ty.Id({name: 'lhist', *}),
+                    args: [
+                        ty.Arg({arg: value, *}),
+                        ty.Arg({arg: ty.Int(lo), *}),
+                        ty.Arg({arg: ty.Int(hi), *}),
+                        ty.Arg({arg: ty.Int(step), *})
+                    ],
+                    *
+                })
+            ) => {
+                let xs0  = __analyze(xs)
+                let idx0 = __analyze(idx)
+                let num-buckets = (hi - lo) / step + 1
+
+                let sz = match xs0 {
+                    Hash(k0, _) => size-of(k0),
+                    _           => throw BpfError("lhist() target must be a hash map")
+                }
+
+                let ^_idx = __emit(idx).spill()
+                let ^_xs  = __emit(xs).spill()
+
+                let ^_ = __load-key(_idx, idx0, sz)
+                __asm.mov64(r7, r0)
+
+                // Ensure histogram exists
+                __load-var('__zero', r3, deref?=false)
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.imov64(r4, BPF_NOEXIST)
+                __asm.call(helper.map_update_elem)
+
+                // Lookup
+                _xs.load(r1)
+                __asm.mov64(r2, r7)
+                __asm.call(helper.map_lookup_elem)
+
+                let jump = __asm.jne64(r0, 0)
+                __asm.exit()
+                jump.patch()
+
+                __asm.mov64(r8, r0) // r8 = histogram base
+
+                // Emit value
+                let ^_arg = __emit(value).spill()
+                _arg.load(r0)
+
+                // Compute bucket index:
+                // if value < lo: bucket = 0
+                // elif value >= hi: bucket = num_buckets - 1
+                // else: bucket = (value - lo) / step
+                __asm.imov64(r1, 0)
+                let below = __asm.jlt64(r0, lo)
+                __asm.imov64(r1, num-buckets - 1)
+                let above = __asm.jge64(r0, hi)
+                __asm.sub64i(r0, lo)
+                __asm.imov64(r2, step)
+                __asm.div64(r0, r2)
+                __asm.mov64(r1, r0)
+                above.patch()
+                below.patch()
+
+                // r1 = bucket index, clamp for verifier
+                // Explicit bound check so verifier knows r1 < num_buckets
+                let in-bounds = __asm.jle64(r1, num-buckets - 1)
+                __asm.imov64(r1, num-buckets - 1)
+                in-bounds.patch()
+                __asm.imul64i(r1, 8)
+                __asm.mov64(r0, r8)
                 __asm.add64(r0, r1)
                 __asm.imov64(r1, 1)
                 __asm.fetch-add(r0, r1)
@@ -2509,19 +3003,19 @@ pub class BpfProgram {
                 }
             },
 
-            ty.SpecialString(parts) => {
+            ty.SpecialString($parts) => {
                 let to-send = []
                 let total-size = 0
 
                 __asm.imov64(r9, 0) // dynamic size counter
 
-                let parts = parts.reverse()
-                let (_, _, id, _) = parts.pop()!
+                let parts: Array[_] = parts.reverse()
+                let (_, _, $id, _) = parts.pop()!
 
                 for part, i in parts {
                     let i = #parts - i - 1
                     match part {
-                        (expr, _, _, _) => do {
+                        ($expr, _, _, _) => do {
                             let t0 = __analyze(expr)
                             let _fmt = __fmts[id][2*i + 1]
 
@@ -2561,8 +3055,7 @@ pub class BpfProgram {
 
                             to-send.push((t0, slot))
                         },
-
-                        _ => ()
+                        _ => nil
                     }
                 }
 
@@ -2698,6 +3191,7 @@ pub class BpfProgram {
 
                 match __analyze(xs) {
                     Record(fields) or AnyPtr(Record(fields)) => do {
+                        let fields: Array[BpfType] = fields
                         let i = match __analyze(idx) {
                             Const(i) => i,
                             _        => throw BpfError("record subscript must be a constant integer")
@@ -2809,62 +3303,17 @@ pub class BpfProgram {
     }
 
     __fixup() {
-        __ast = ty.walk(__ast, expr -> match expr {
-            ty.SpecialString([_]) => expr,
-
-            ty.SpecialString(parts) => do {
-                let new-parts = []
-
-                for match parts {
-                    (expr, ty.SpecialString([fmt]), width, fun) => {
-                        new-parts.push((expr, ty.String(fmt), width, fun))
-                    },
-
-                    part => {
-                        new-parts.push(part)
-                    }
-                }
-
-                ty.SpecialString(new-parts)
-            },
-
-            _ => expr
-        })
-
-        __ast = ty.walk(__ast, expr -> match expr {
-            ty.SpecialString(parts) => do {
-                let new-parts = [(nil, nil, #__fmts, nil)]
-                let key = []
-
-                for match parts {
-                    (expr, _fmt, width, fun) => {
-                        let fmt = match _fmt {
-                            ty.String(fmt) => fmt,
-                            _              => nil
-                        }
-                        new-parts.push((expr, nil, width, fun))
-                        key.push({
-                            fmt,
-                            width,
-                            type: nil,
-                            fun: (fun != nil) ?: ty.eval(fun)
-                        })
-                    },
-
-                    string => key.push(string)
-                }
-
-                __fmts.push(key)
-
-                ty.SpecialString(new-parts)
-            },
-
-            _ => expr
-        })
+        __ast = __fixup-fmtspecs(__ast)
+        __ast = __fixup-extract(__ast, __fmts)
     }
 
     compile() {
         __fixup()
+        // Pre-declare comm if we need it for the -c filter
+        // (only for probe programs, not interval timers)
+        if __type != BPF_PROG_TYPE_PERF_EVENT && __context.target-comm != nil && 'comm' not in __env {
+            __var('comm', 16)
+        }
         __analyze(__ast)
 
         __stack-alloc = StackAllocator(__var-off, __asm)
@@ -2896,18 +3345,38 @@ pub class BpfProgram {
             }
         }
 
-        if 'comm' in __env {
+        let __tcomm = if __type != BPF_PROG_TYPE_PERF_EVENT { __context.target-comm } else { nil }
+        if 'comm' in __env || __tcomm != nil {
             __var('comm').load-addr(r1)
             __asm.imov64(r2, 16)
             __asm.call(helper.get_current_comm)
+            if let $tc = __tcomm {
+                __var('comm').load-addr(r1)
+                __asm.imov64(r2, #tc)
+                __load-string(tc, r3)
+                __asm.call(helper.strncmp)
+                let skip = __asm.jeq64(r0, 0)
+                __asm.imov64(r0, 0)
+                __asm.exit()
+                skip.patch()
+            }
         }
 
-        if 'pid' in __env || 'tgpid' in __env {
+        let __tpid = if __type != BPF_PROG_TYPE_PERF_EVENT { __context.target-pid } else { nil }
+        if 'pid' in __env || 'tgid' in __env || __tpid != nil {
             __asm.call(helper.get_current_pid_tgid)
-            if 'tgid' in __env {
+            if 'tgid' in __env || __tpid != nil {
                 __asm.mov64(r1, r0)
                 __asm.shr64i(r1, 32)
-                __asm.stx64(rbp, r1, __offset('tgid'))
+                if 'tgid' in __env {
+                    __asm.stx64(rbp, r1, __offset('tgid'))
+                }
+                if let $tp = __tpid {
+                    let skip = __asm.jeq64(r1, tp)
+                    __asm.imov64(r0, 0)
+                    __asm.exit()
+                    skip.patch()
+                }
             }
             if 'pid' in __env {
                 __asm.and64i(r0, 0xFFFFFFFF)
@@ -2917,6 +3386,41 @@ pub class BpfProgram {
 
         __asm.call(helper.get_smp_processor_id)
         __asm.stx32(rbp, r0, __offset('cpu'))
+
+        if 'elapsed' in __env {
+            // Get current time
+            __asm.call(helper.ktime_get_ns)
+            __asm.mov64(r6, r0) // r6 = now
+
+            // Lookup __start_time[0] via PerCPUArray (inline, no __var)
+            let __start_map = __context.per-cpu-array('__start_time', 1, 8)
+            let ^_k = alloc()
+            __asm.imov64(r0, 0)
+            _k.store(r0)
+            _k.load-addr(r2)
+            __asm.ld_map_fd(r1, __start_map.fd)
+            __asm.call(helper.map_lookup_elem)
+
+            // NULL check
+            let jump = __asm.jne64(r0, 0)
+            __asm.exit()
+            jump.patch()
+
+            __asm.mov64(r7, r0) // r7 = pointer to start time
+
+            // Load stored start time
+            __asm.ldx64(r5, r7, 0)
+
+            // If start time is 0 (first invocation), store current time
+            let have-start = __asm.jne64(r5, 0)
+            __asm.stx64(r7, r6, 0)
+            __asm.mov64(r5, r6)
+            have-start.patch()
+
+            // elapsed = now - start
+            __asm.sub64(r6, r5)
+            __asm.stx64(rbp, r6, __offset('elapsed'))
+        }
 
         __asm.note('----- begin main program -----')
 
@@ -2937,6 +3441,7 @@ pub class BpfProgram {
     unload() {
         for __tracing {
             it.disable()
+            it.close()
         }
         if __fd != nil {
             close(__fd)
@@ -2969,6 +3474,7 @@ pub class BpfProgram {
             __var('comm', size=16).type = Str(16)
             __var('pid').type = U32
             __var('tgid').type = U32
+            __var('elapsed').type = I64
             __var('ctx').type = KernelPtr(Struct(event.ctx))
         }
         __tracing.push(event.open())
@@ -2989,11 +3495,6 @@ pub class BpfProgram {
 }
 
 pub ns map {
-    trait BpfMap {
-        fd      -> Int;
-        value() -> Any;
-    }
-
     pub class RingBuffer : BpfMap {
         __cap:   Int
         __attr:  bpf_attr_map_create
@@ -3197,7 +3698,7 @@ pub ns map {
             __fd
         }
 
-        key-type -> BpfType {
+        key-type {
             __key-type
         }
 
@@ -3205,7 +3706,7 @@ pub ns map {
             __key-size
         }
 
-        value-type -> BpfType {
+        value-type {
             __value-type
         }
 
@@ -3213,10 +3714,14 @@ pub ns map {
             __value-size
         }
 
+        dump(ctx: BpfContext) {
+            dump(ctx.value@(__key-type, _), ctx.value@(__value-type, _))
+        }
+
         dump[K, V](
             key-func: (String -> K) = Blob,
             val-func: (String -> V) = Blob
-        ) -> Array[(K, V)] {
+        ) {
             let cursor      = c.auto(c.alloc(__key-size))
             let next-cursor = c.auto(c.alloc(__key-size))
             let value-buf   = c.auto(c.alloc(__value-size))
@@ -3325,7 +3830,7 @@ pub ns map {
             __fd
         }
 
-        [](id: Int) -> Array[Int] | nil {
+        [](id: Int) -> prelude::Array[Int] | nil {
             let len = STACK_TRACE_SIZE / c.size(c.ptr)
             let key = c.box(c.u32, id)
             let value = c.new(c.u64, len)
@@ -3377,7 +3882,7 @@ pub class TraceEvent < PerfEvent {
         }
     }
 
-    static __load-ctx(tracepoint: String) -> Dict[String, (Int, BpfType)] {
+    static load-ctx(tracepoint: String) -> Dict[String, (Int, BpfType)] {
         let format = __get-format(tracepoint)
 
         let fields = format
@@ -3386,7 +3891,7 @@ pub class TraceEvent < PerfEvent {
             .map(\_.split('\t'))
             .map(match [_, field, offset, *] => (
                 field.comb(/^field:|;/),
-                offset.comb(/^offset:|;/).int
+                offset.comb(/^offset:|;/).to-i
             ))
 
         let ctx = %{}
@@ -3400,10 +3905,10 @@ pub class TraceEvent < PerfEvent {
     }
 
 
-    init(name: String) {
+    init(name: String, ctx: Dict[String, (Int, BpfType)] | nil = nil) {
         __name = name
         __id   = __get-id(name)
-        __ctx  = __load-ctx(name)
+        __ctx  = ctx ?? load-ctx(name)
     }
 
     open() -> EventHandle {
@@ -3442,7 +3947,7 @@ pub class EventHandle {
     __bpf-fd:   Int
     __enabled?: Bool
 
-    init(fd: Int, event: TraceEvent) {
+    init(fd: Int, event: PerfEvent) {
         __fd = fd
         __event = event
         __bpf-fd = -1
@@ -3473,6 +3978,13 @@ pub class EventHandle {
         __enabled? = false
     }
 
+    close() {
+        if __fd >= 0 {
+            os::close(__fd)
+            __fd = -1
+        }
+    }
+
     enabled? -> Bool {
         __enabled?
     }
@@ -3494,14 +4006,216 @@ fn which(cmd: String) -> String | nil {
     }
 }
 
+fn re-escape(s: String) -> String {
+    s.sub(/[\\^$.*+?()[\]{}|]/, \"\\{_}")
+}
+
 fn find-lib(name: String) -> String | nil {
-    let pattern = regex("^\\s*{name}(?:\\.so(?:\\.\\d+)*)? [^=]*=>\\s+(.+)$")
-    for line in sh('ldconfig -p').lines() {
+    let pattern = regex("^\\s*{re-escape(name)}(?:\\.so(?:\\.\\d+)*)? [^=]*=>\\s+(.+)$")
+    let output = sh('ldconfig -p') ?? return nil
+    for line in output.lines() {
         if let [_, path] = line.match(pattern) {
             return path
         }
     }
 }
+
+fn resolve-binary(binary: String) -> String {
+    if '/' not in binary {
+        if let $path = which(binary) {
+            return path
+        } else if let $lib = find-lib(binary) {
+            return lib
+        } else {
+            throw BpfError("failed to locate binary or library: {binary}")
+        }
+    }
+    binary
+}
+
+fn container-pids() -> Array[String] {
+    let host-mnt = readlink('/proc/1/ns/mnt') ?? return []
+    let mnt-seen = [host-mnt]
+    let candidates = []
+    if let $entries = listdir('/proc') {
+        for entry in entries {
+            if !entry.match?(/^\d+$/) { continue }
+            if let $mnt = readlink("/proc/{entry}/ns/mnt") {
+                if mnt in mnt-seen { continue }
+                mnt-seen.push(mnt)
+                candidates.push(entry)
+            }
+        }
+    }
+    candidates
+}
+
+fn container-roots() -> Array[String] {
+    let host-root = stat('/')
+    if host-root == nil { return [] }
+
+    let root-seen = []
+    let roots = []
+    for pid in container-pids() {
+        let root = "/proc/{pid}/root"
+        if let $s = stat(root) {
+            if s.dev == host-root.dev && s.ino == host-root.ino { continue }
+            let key = (s.dev, s.ino)
+            if key in root-seen { continue }
+            root-seen.push(key)
+            roots.push(root)
+        }
+    }
+
+    roots
+}
+
+const LIB_DIRS = [
+    '/lib/x86_64-linux-gnu',
+    '/usr/lib/x86_64-linux-gnu',
+    '/lib64',
+    '/usr/lib64',
+    '/usr/lib',
+    '/lib'
+]
+
+fn find-lib-in(root: String, name: String) -> String | nil {
+    let pat = regex("^{re-escape(name)}(?:\\.so(?:\\.\\d+)*)?$")
+    for dir in LIB_DIRS {
+        let full = "{root}{dir}"
+        if let $entries = listdir(full) {
+            for entry in entries {
+                if entry.match?(pat) {
+                    return "{full}/{entry}"
+                }
+            }
+        }
+    }
+}
+
+fn find-lib-in-maps(pid: String, name: String) -> String | nil {
+    let maps = slurp("/proc/{pid}/maps") ?? return nil
+    let pat = regex("{re-escape(name)}(?:\\.so(?:\\.\\d+)*)?$")
+    for line in maps.lines() {
+        if let [_, path] = line.match(/\s(\/\S+)\s*$/) {
+            if path.match?(pat) {
+                return "/proc/{pid}/root{path}"
+            }
+        }
+    }
+}
+
+@memoized
+fn resolve-all-binaries(binary: String, pid: Int | nil = nil) -> Array[String] {
+    let host-path = resolve-binary(binary)
+    let paths = [host-path]
+
+    let inodes = if let $s = stat(host-path) {
+        [(s.dev, s.ino)]
+    } else {
+        []
+    }
+
+    fn add(p) {
+        if let $s = stat(p) {
+            let key = (s.dev, s.ino)
+            if key not in inodes {
+                inodes.push(key)
+                paths.push(p)
+            }
+        }
+    }
+
+    if pid != nil {
+        // -p: only include binaries mapped by the target process
+        if let $p = find-lib-in-maps("{pid}", binary) {
+            add(p)
+        }
+        return paths
+    }
+
+    // Try maps-based discovery (finds only loaded libraries)
+    let pids = container-pids()
+    let found-via-maps = false
+    for pid in pids {
+        if let $p = find-lib-in-maps(pid, binary) {
+            add(p)
+            found-via-maps = true
+        }
+    }
+
+    // Fall back to filesystem scanning if maps found nothing
+    if !found-via-maps {
+        let roots = container-roots()
+        if '/' not in binary {
+            for root in roots {
+                let p = "{root}{host-path}"
+                if Path(p).exists? {
+                    add(p)
+                } else if let $p = find-lib-in(root, binary) {
+                    add(p)
+                }
+            }
+        } else {
+            for root in roots {
+                let p = "{root}{binary}"
+                if Path(p).exists? {
+                    add(p)
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+let __probe_pfx = "{getpid()}_"
+let __probe_id = 0
+let __probe_names = []
+let __probe_binaries = []
+let __uprobe_fd = -1
+
+fn open-uprobe-events() {
+    if __uprobe_fd < 0 {
+        __uprobe_fd = os::open("{TRACEFS_PATH}/uprobe_events", O_RDWR | O_CLOEXEC)
+        if __uprobe_fd < 0 {
+            throw OSError('open(uprobe_events)')
+        }
+    }
+}
+
+fn close-uprobe-events() {
+    if __uprobe_fd >= 0 {
+        close(__uprobe_fd)
+        __uprobe_fd = -1
+    }
+}
+
+fn write-uprobe-event(prefix: String, name: String, file: String, offset: Int) {
+    open-uprobe-events()
+
+    if write(__uprobe_fd, "{prefix}:{name} {file}:{offset}\n") < 0 {
+        throw OSError('write(uprobe_events)')
+    }
+
+    __probe_names.push(name)
+}
+
+fn cleanup-uprobe-events() {
+    let fd = os::open("{TRACEFS_PATH}/uprobe_events", O_RDWR | O_CLOEXEC)
+    if fd < 0 { return }
+
+    for name in __probe_names {
+        if (Path("{TRACEFS_PATH}/events/uprobes/{name}")).exists? {
+            Path("{TRACEFS_PATH}/events/uprobes/{name}/enable").write('0\n')
+            write(fd, "-:{name}\n")
+        }
+    }
+
+    close(fd)
+}
+
+onExit(cleanup-uprobe-events)
 
 pub class UprobeEvent < TraceEvent {
     __name:   String
@@ -3523,49 +4237,20 @@ pub class UprobeEvent < TraceEvent {
     }
 
     init(name: String, file: String, offset: Int) {
-        __name   = name
+        __name   = name[-16;].sub(/\W/, '_')
         __file   = file
         __offset = offset
-
-        let fd = os::open("{TRACEFS_PATH}/uprobe_events", O_RDWR | O_CLOEXEC)
-        if fd < 0 {
-            throw OSError('open(uprobe_events)')
-        }
-
-        // Remove existing event with the same name
-        if (Path("{TRACEFS_PATH}/events/uprobes/{__name}")).exists? {
-            Path("{TRACEFS_PATH}/events/uprobes/{__name}/enable").write('0\n')
-            if write(fd, "-:{__name}\n") < 0 {
-                defer close(fd)
-                throw OSError('write(uprobe_events)')
-            }
-        }
-
-        if write(fd, dbg("p:{__name} {__file}:{__offset}\n")) < 0 {
-            defer close(fd)
-            throw OSError('write(uprobe_events)')
-        }
-
-        close(fd)
-
+        write-uprobe-event('p', __name, __file, __offset)
         super("uprobes/{__name}")
+        //eprint(chalk"[yellow]uprobe[/]: [green]{file}[/]:[blue]{offset}[/]")
     }
 
-    init(name: String, binary: String, func: String) {
-        debug!("creating UprobeEvent for function {func} in binary {binary}")
-        if '/' not in binary {
-            if let $path = which(binary) {
-                binary = path
-            } else if let $lib = find-lib(binary) {
-                binary = lib
-            } else {
-                throw BpfError("failed to locate binary or library: {binary}")
-            }
-        }
-        if let [(_, offset, args), *] = dbg(dwarf::lookup2(binary, func)) {
+    init(name: String, binary: String, func: String, extra: Int = 0) {
+        let binary = resolve-binary(binary)
+        if let [(_, offset, args), *] = dwarf::lookup2(binary, func) {
             let offs = [112, 104, 96, 88, 80, 72]
             __args = %{name: (offs[i], ctx-arg-type(type).1) for (name, type), i in args}
-            init(name, binary, offset)
+            init(name, binary, offset + extra)
         } else {
             throw BpfError("failed to find function {func} in {binary}")
         }
@@ -3576,7 +4261,250 @@ pub class UprobeEvent < TraceEvent {
     }
 }
 
-class IntervalEvent < PerfEvent {
+pub class UretprobeEvent < TraceEvent {
+    __name:   String
+    __file:   String
+    __offset: Int
+
+    static __regs: Dict[String, (Int, BpfType)] = %{
+        'retval': (80, U64),
+        'ret':    (128, U64),
+        'sp':     (152, U64),
+        'ip':     (136, U64),
+        'bp':     (32,  U64)
+    }
+
+    init(name: String, file: String, offset: Int) {
+        __name   = name[-16;].sub(/\W/, '_')
+        __file   = file
+        __offset = offset
+        write-uprobe-event('r', __name, __file, __offset)
+        super("uprobes/{__name}")
+    }
+
+    init(name: String, binary: String, func: String, extra: Int = 0) {
+        debug!("creating UretprobeEvent for function {func} in binary {binary}")
+        let binary = resolve-binary(binary)
+        if let [(_, offset, _), *] = dwarf::lookup2(binary, func) {
+            init(name, binary, offset + extra)
+        } else {
+            throw BpfError("failed to find function {func} in {binary}")
+        }
+    }
+
+    ctx -> Dict[String, (Int, BpfType)] {
+        __regs
+    }
+}
+
+fn unique-offsets(results: Array[_]) {
+    let seen = []
+    let out = []
+    for (name, offset, args) in results {
+        if offset not in seen {
+            seen.push(offset)
+            out.push((name, offset, args))
+        }
+    }
+    out
+}
+
+const MAX_PROBES = 256
+
+pub fn uprobe-events(binary: String, func: String | Regex, extra: Int = 0, pid: Int | nil = nil) -> Array[UprobeEvent] {
+    let binaries = resolve-all-binaries(binary, pid)
+    let events = []
+    for bin in binaries {
+        let results = unique-offsets(dwarf::lookup2(bin, func))
+        if #results > 0 && bin not in __probe_binaries {
+            __probe_binaries.push(bin)
+        }
+        for (_, offset, _) in results {
+            events.push(UprobeEvent("p{__probe_pfx}{__probe_id += 1}", bin, offset + extra))
+            if #events >= MAX_PROBES {
+                warn!("uprobe: capping at {MAX_PROBES} probes ({#binaries} binaries matched)")
+                break break
+            }
+        }
+    }
+    close-uprobe-events()
+    if #events == 0 {
+        throw BpfError("no matching symbols for {func} in {binary}")
+    }
+    events
+}
+
+pub fn uretprobe-events(binary: String, func: String | Regex, extra: Int = 0, pid: Int | nil = nil) -> Array[UretprobeEvent] {
+    let binaries = resolve-all-binaries(binary, pid)
+    let events = []
+    for bin in binaries {
+        let results = unique-offsets(dwarf::lookup2(bin, func))
+        if #results > 0 && bin not in __probe_binaries {
+            __probe_binaries.push(bin)
+        }
+        for (_, offset, _) in results {
+            events.push(UretprobeEvent("r{__probe_pfx}{__probe_id += 1}", bin, offset + extra))
+            if #events >= MAX_PROBES {
+                warn!("uretprobe: capping at {MAX_PROBES} probes ({#binaries} binaries matched)")
+                break break
+            }
+        }
+    }
+    close-uprobe-events()
+    if #events == 0 {
+        throw BpfError("no matching symbols for {func} in {binary}")
+    }
+    events
+}
+
+let __kprobe_names = []
+
+fn write-kprobe-event(prefix: String, name: String, symbol: String) {
+    let fd = os::open("{TRACEFS_PATH}/kprobe_events", O_RDWR | O_CLOEXEC)
+    if fd < 0 {
+        throw OSError('open(kprobe_events)')
+    }
+
+    if (Path("{TRACEFS_PATH}/events/kprobes/{name}")).exists? {
+        Path("{TRACEFS_PATH}/events/kprobes/{name}/enable").write('0\n')
+        if write(fd, "-:{name}\n") < 0 {
+            defer close(fd)
+            throw OSError('write(kprobe_events)')
+        }
+    }
+
+    if write(fd, "{prefix}:{name} {symbol}\n") < 0 {
+        defer close(fd)
+        throw OSError('write(kprobe_events)')
+    }
+
+    close(fd)
+
+    __kprobe_names.push(name)
+}
+
+fn cleanup-kprobe-events() {
+    let fd = os::open("{TRACEFS_PATH}/kprobe_events", O_RDWR | O_CLOEXEC)
+    if fd < 0 { return }
+
+    for name in __kprobe_names {
+        if (Path("{TRACEFS_PATH}/events/kprobes/{name}")).exists? {
+            Path("{TRACEFS_PATH}/events/kprobes/{name}/enable").write('0\n')
+            write(fd, "-:{name}\n")
+        }
+    }
+
+    close(fd)
+}
+
+onExit(cleanup-kprobe-events)
+
+pub class KprobeEvent < TraceEvent {
+    static __regs: Dict[String, (Int, BpfType)] = %{
+        'arg0': (112, U64),
+        'arg1': (104, U64),
+        'arg2': (96,  U64),
+        'arg3': (88,  U64),
+        'arg4': (80,  U64),
+        'arg5': (72,  U64),
+        'ret':  (128, U64),
+        'sp':   (152, U64),
+        'ip':   (136, U64),
+        'bp':   (32,  U64)
+    }
+
+    init(name: String, symbol: String) {
+        write-kprobe-event('p', name, symbol)
+        super("kprobes/{name}")
+    }
+
+    ctx -> Dict[String, (Int, BpfType)] {
+        __regs
+    }
+}
+
+pub class KretprobeEvent < TraceEvent {
+    static __regs: Dict[String, (Int, BpfType)] = %{
+        'retval': (80, U64),
+        'ret':    (128, U64),
+        'sp':     (152, U64),
+        'ip':     (136, U64),
+        'bp':     (32,  U64)
+    }
+
+    init(name: String, symbol: String) {
+        write-kprobe-event('r', name, symbol)
+        super("kprobes/{name}")
+    }
+
+    ctx -> Dict[String, (Int, BpfType)] {
+        __regs
+    }
+}
+
+pub fn kprobe-event(symbol: String) -> KprobeEvent {
+    KprobeEvent("k{__probe_pfx}{__probe_id += 1}", symbol)
+}
+
+pub fn kretprobe-event(symbol: String) -> KretprobeEvent {
+    KretprobeEvent("kr{__probe_pfx}{__probe_id += 1}", symbol)
+}
+
+pub fn trace-events(kind: String, name: String | Regex) -> Array[TraceEvent] {
+    if name :: String {
+        return [TraceEvent("{kind}/{name}")]
+    }
+
+    let dir = "{TRACEFS_PATH}/events/{kind}"
+    let all = listdir(dir)
+    let entries = []
+    for e in all {
+        if e.match?(name) {
+            entries.push(e)
+        }
+    }
+    entries.sort()
+
+    if #entries == 0 {
+        throw BpfError("no matching tracepoints for {name} in {kind}")
+    }
+
+    // Load ctx for each matching tracepoint, skipping any with
+    // unsupported C types in their format files.
+    let ctxs = []
+    let valid = []
+    for e in entries {
+        try {
+            ctxs.push(TraceEvent.load-ctx("{kind}/{e}"))
+            valid.push(e)
+        } catch err {
+            warn!("skipping tracepoint {kind}/{e}: {err}")
+        }
+    }
+
+    if #valid == 0 {
+        throw BpfError("no usable tracepoints for {name} in {kind}")
+    }
+
+    // Compute shared context: only fields with identical
+    // (name, offset, type) across ALL matching events are kept.
+    let shared = ctxs[0]
+    for other in ctxs[1;] {
+        let next = %{}
+        for k, v in shared {
+            if let $v2 = other.?{k} {
+                if v2 == v {
+                    next[k] = v
+                }
+            }
+        }
+        shared = next
+    }
+
+    [TraceEvent("{kind}/{e}", ctx=shared) for e in valid]
+}
+
+pub class IntervalEvent < PerfEvent {
     __period: Int
 
     init(period: Int) {
@@ -3730,10 +4658,49 @@ pub class PrettyHistogram {
     }
 }
 
+pub class PrettyLinearHistogram {
+    __data: Array[Int]
+    __lo:   Int
+    __step: Int
+
+    init(data: Array[Int], lo: Int, step: Int) {
+        __data = data
+        __lo   = lo
+        __step = step
+    }
+
+    __pretty__*() {
+        let lo    = 0
+        let hi    = __data.searchr-by(\_ > 0)
+        let total = __data.sum()
+
+        if total == 0 { return }
+
+        yield pretty::Raw('[')
+        yield pretty::Push
+
+        for i in lo...hi {
+            let a = __lo + i * __step
+            let b = a + __step
+            let label = "[{a}, {b})"
+            let count = __data[i]
+            let width = iround(count * 40.0 / total)
+            let bar   = "|{('@' * width).rpad(40)}|"
+            yield pretty::Raw(chalk"    [bright yellow]{label:-16}[/]  [bright cyan]{count:8}[/]  [bright blue]{bar}[/]")
+            if i != hi {
+                yield pretty::Newline
+            }
+        }
+
+        yield pretty::Pop
+        yield pretty::Raw(']')
+    }
+}
+
 pub class PrettyStackTrace {
     __trace: Array[(String, (String, Int, Int) | nil) | nil]
 
-    static nice(location: Int) -> chalk::Text {
+    static nice(location: (String, (String, Int, Int) | nil) | nil) -> chalk::Text {
         match location {
             (name, (file, line, col)) => chalk"[bright green]{name:32}[/] "
                                               "[blue]at[/] [bright yellow]{file}[/]"
@@ -3772,6 +4739,13 @@ pub fn histogram(data: IntoPtr[Int]) {
     PrettyHistogram(val)
 }
 
+pub fn linear-histogram(data: IntoPtr[Int], lo: Int, hi: Int, step: Int) {
+    let n     = (hi - lo) / step + 1
+    let data  = ptr.typed(data.__ptr__(), c.u64)
+    let val   = [data[it] for ..n]
+    PrettyLinearHistogram(val, lo, step)
+}
+
 pub class BpfContext {
     __progs:  Array[BpfProgram]
     __maps:   Dict[String, map.BpfMap]
@@ -3781,30 +4755,52 @@ pub class BpfContext {
     __ctxs:   Dict[String, dwarf::Context]
     __cache:  Dict[Int, String]
     __cacheq: SharedQueue[(Int, String)]
-    __cacher: Thread[_]
+    __cacher:  Thread[_]
+    __running: Bool
+    target-pid: Int | nil
+    target-comm: String | nil
 
-    init() {
-        __progs  = []
-        __maps   = %{}
-        __stacks = map.StackTraces()
-        __pidq   = map.RingBuffer()
-        __pids   = map.LruHash(4, Time64)
-        __ctxs   = %{}
-        __cache  = %{}
-        __cacheq = SharedQueue()
-        __cacher = Thread(__run-cacher)
+    init(target-pid: Int | nil = nil, target-comm: String | nil = nil) {
+        __progs   = []
+        __maps    = %{}
+        __stacks  = map.StackTraces()
+        __pidq    = map.RingBuffer()
+        __pids    = map.LruHash(4, Time64)
+        __ctxs    = %{}
+        __cache   = %{}
+        __cacheq  = SharedQueue()
+        __running = true
+        __cacher  = Thread(__run-cacher)
+        self.target-pid = target-pid
+        self.target-comm = target-comm
+    }
+
+    static __rewrite-maps(pid: Int, maps: String) -> String {
+        if not let $proc-root = stat("/proc/{pid}/root") {
+            return maps
+        }
+        if let $host-root = stat('/') {
+            if proc-root.dev == host-root.dev && proc-root.ino == host-root.ino {
+                return maps
+            }
+        }
+        // Process has a different root (container). Prefix paths with
+        // /proc/{pid}/root so the kernel resolves through its mount
+        // namespace (handles overlay fs and bind mounts).
+        maps.sub(/\/\S+/, \"/proc/{pid}/root{_}")
     }
 
     __run-cacher() {
         let events = []
-        for (;;) {
-            if poll([__pidq.fd], events, -1) < 0 {
+        while __running {
+            if poll([__pidq.fd], events, 1) < 0 {
                 sleep(0.1)
                 continue
             }
             while let $record = __pidq.try-read() {
                 let pid = c.load(c.u32, record)
                 if let $maps = slurp("/proc/{pid}/maps") {
+                    let maps = __rewrite-maps(pid, maps)
                     __cacheq.put((pid, maps))
                 } else {
                     warn!("failed to cache /proc/{pid}/maps")
@@ -3848,21 +4844,21 @@ pub class BpfContext {
         }
     }
 
-    prog(type: Int, ast: AST) -> BpfProgram {
+    prog(type: Int, ast: _) -> BpfProgram {
         let prog = BpfProgram(type, ast, self)
         __progs.push(prog)
         __progs[-1]
     }
 
-    tracepoint(ast: AST) -> BpfProgram {
+    tracepoint(ast: _) -> BpfProgram {
         prog(BPF_PROG_TYPE_TRACEPOINT, ast)
     }
 
-    kprobe(ast: AST) -> BpfProgram {
+    kprobe(ast: _) -> BpfProgram {
         prog(BPF_PROG_TYPE_KPROBE, ast)
     }
 
-    perf-event(ast: AST) -> BpfProgram {
+    perf-event(ast: _) -> BpfProgram {
         prog(BPF_PROG_TYPE_PERF_EVENT, ast)
     }
 
@@ -3874,7 +4870,7 @@ pub class BpfContext {
         __pids
     }
 
-    proc-maps -> SharedQueue[(Int, String)] {
+    proc-maps {
         __cache
     }
 
@@ -3907,14 +4903,14 @@ pub class BpfContext {
                     []
                 }
                 let ctx = dwarf-ctx(maps)
-                [ctx.resolve(it) for it in addrs]
+                [ctx.resolve(it) for addrs]
             },
             _ => []
         }
         PrettyStackTrace(trace)
     }
 
-    value(t0: BpfType, data: IntoPtr[Any]) -> Any {
+    value(t0: BpfType, data: _) -> Any {
         match t0 {
             U8  => c.load(c.u8, data),
             I8  => c.load(c.i8, data),
@@ -3944,6 +4940,22 @@ pub class BpfContext {
 
             Histogram => histogram(data),
 
+            Avg(Duration64) => do {
+                let data = data.__ptr__()
+                let sum: Int   = c.load(c.u64, data)
+                let count: Int = c.load(c.u64, data + 8)
+                Duration((count > 0) ? (sum / float(count)) : 0.0)
+            },
+
+            Avg(_) => do {
+                let data = data.__ptr__()
+                let sum: Int   = c.load(c.u64, data)
+                let count: Int = c.load(c.u64, data + 8)
+                int(1000 * ((count > 0) ? (sum / float(count)) : 0.0)) / 1000.0
+            },
+
+            LinearHistogram((lo, hi, step)) => linear-histogram(data, lo, hi, step),
+
             Record(fields) => do {
                 let data = data.__ptr__()
                 let vals = []
@@ -3958,7 +4970,7 @@ pub class BpfContext {
         }
     }
 
-    run() {
+    run(timeout: Float | nil = nil) {
         __compile()
 
         for __progs {
@@ -3971,12 +4983,16 @@ pub class BpfContext {
         let last-cleanup = time.now()
 
         let stop = false
+        signal(SIGINT, () -> (stop = true))
 
-        signal(SIGINT, () -> do { stop = true; })
-
+        let t0 = time.now()
         let events = []
 
-        while !stop {
+        fn timeout?() {
+            (timeout != nil) && (time.now() > t0 + timeout)
+        }
+
+        while !stop && !timeout?() {
             while let Some((pid, maps)) = __cacheq.try-take() {
                 __cache[pid] = maps
             }
@@ -4008,7 +5024,10 @@ pub class BpfContext {
                                 buf.push(fun ? fun(text) : text)
 
                                 ptr += match t {
-                                    StringLike => val.size() + 1,
+                                    StringLike => do {
+                                        let n: Int = cast(val.size())
+                                        n + 1
+                                    },
                                     _          => size-of(t)
                                 }
                             },
@@ -4030,8 +5049,7 @@ pub class BpfContext {
             sleep(0.001)
         }
 
-        for progs {
-            it.unload()
-        }
+        __running = false
+        __cacher.join()
     }
 }
