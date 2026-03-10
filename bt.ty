@@ -19,7 +19,9 @@ import ebpf (..)
 C! fn { void _exit(int); }
 
 pub const ctx = BpfContext()
-let   end = nil
+let   end   = nil
+let   begin = nil
+let   __lat-counter = 0
 
 fn comm(key: Blob) {
     if let $i = key.search(0) {
@@ -264,9 +266,13 @@ pub macro END {
     let block = parse.stmt()
     $$[
         $$::(end) = fn () {
+            let the-ctx = $$::(ctx)
             let defs = [
-                $$[let $$name = $${val}$$]
-                for name, val in $$::(ctx).maps
+                do {
+                    let dumped = the-ctx.dump-map(name, val)
+                    $$[let $$name = $${dumped}$$]
+                }
+                for name, val in the-ctx.maps
             ]
             let prog = $${ty.Multi}([*defs, $${block}])
             __eval__($$[
@@ -274,6 +280,72 @@ pub macro END {
             $$])
         }
     $$]
+}
+
+pub macro BEGIN {
+    let block = parse.stmt()
+    $$[
+        $$::(begin) = fn () {
+            let prog = $${block}
+            __eval__($$[
+                (fn () { $$prog })()
+            $$])
+        }
+    $$]
+}
+
+pub macro latency {
+    __lat-counter += 1
+    let id = __lat-counter
+    let (binary, func, off) = parse-uprobe()
+    let filter = eat-filter()
+    let body = wrap-filter(filter, parse.stmt())
+
+    let starts-name = "__lat_{id}"
+    let starts-id = ty.Id({name: starts-name})
+    let pid-id    = ty.Id({name: 'pid'})
+
+    // Entry: __lat_N[pid] = now()
+    let entry-ast = ty.Assign(
+        ty.Subscript(starts-id, pid-id),
+        ty.Call({func: ty.Id({name: 'now'}), args: []})
+    )
+
+    // Return: lookup start, compute elapsed, run body, cleanup
+    let t0 = ty.Id({name: '__lat_t0'})
+    let ret-ast = ty.Block([
+        ty.Let(t0, ty.Subscript(starts-id, pid-id)),
+        ty.If(
+            [t0],
+            ty.Block([
+                ty.Let(
+                    ty.Id({name: 'elapsed'}),
+                    ty.Sub(
+                        ty.Call({func: ty.Id({name: 'now'}), args: []}),
+                        t0
+                    )
+                ),
+                body,
+                ty.Call({
+                    func: ty.Id({name: 'delete'}),
+                    args: [ty.Arg({arg: ty.Subscript(starts-id, pid-id)})]
+                })
+            ]),
+            nil
+        )
+    ])
+
+    let entry-prog = ctx.kprobe(entry-ast)
+    for event in uprobe-events(binary, func, off, ctx.target-pid) {
+        entry-prog.attach(event)
+    }
+
+    let ret-prog = ctx.kprobe(ret-ast)
+    for event in uretprobe-events(binary, func, off, ctx.target-pid) {
+        ret-prog.attach(event)
+    }
+
+    ty.Nil
 }
 
 /// bt.ty - a BPF tracing tool inspired by bpftrace, written in Ty.
@@ -289,6 +361,17 @@ clap! Bt {
 
     /// Trace only processes whose comm contains this string
     comm: String, short: 'c'
+}
+
+fn auto-print-maps() {
+    for name, m in ctx.maps {
+        if name.match?(/^__/) { continue }
+        let val = ctx.dump-map(name, m)
+        if val != nil {
+            print("\n@{name}:")
+            print(pretty(val))
+        }
+    }
 }
 
 fn main() {
@@ -307,9 +390,14 @@ fn main() {
     }
 
     onExit(fn () {
+        if begin != nil {
+            begin()
+        }
         ctx.run(opts.timeout)
         if end != nil {
             end()
+        } else {
+            auto-print-maps()
         }
     })
 }

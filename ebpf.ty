@@ -1724,6 +1724,25 @@ pub class BpfProgram {
                 t0
             },
 
+            // Scalar aggregation: foo = sum(bar) → create single-entry hash
+            ty.Assign(ty.Id({name, *}), value)
+            and let ty.Call({func: ty.Id({name: agg, *}), *}) = value
+            and agg in ['sum', 'count', 'min', 'max', 'avg', 'hist', 'lhist'] => {
+                let value-type = __analyze(value)
+                let var = __var(name)
+                if var.type == nil {
+                    var.type = Hash(U32, deref-ptr-type(value-type))
+                    var.map = __context.hash(
+                        name,
+                        key-type=U32,
+                        value-type=deref-ptr-type(value-type),
+                        max-buckets=1
+                    )
+                    __context.mark-scalar(name, deref-ptr-type(value-type))
+                }
+                var.type
+            },
+
             ty.Let(target, value) or ty.Assign(target, value) => {
                 let t0 = __analyze(value)
                 __analyze-lvalue(target, t0)
@@ -1752,6 +1771,10 @@ pub class BpfProgram {
                 match name {
                     'now'    => Time64,
                     'tai'    => Time64,
+                    'nsecs'  => U64,
+                    'usecs'  => U64,
+                    'msecs'  => U64,
+                    'secs'   => U64,
                     'print'  => Unit,
                     'hist'   => Histogram,
                     'lhist'  => match arg-types {
@@ -2192,6 +2215,52 @@ pub class BpfProgram {
                         }
                     },
 
+                    'nsecs' => {
+                        match args {
+                            [ty.Arg({arg: value, *})] => __emit(value),
+                            _ => throw BpfError('nsecs() expects one argument')
+                        }
+                    },
+
+                    'usecs' => {
+                        match args {
+                            [ty.Arg({arg: value, *})] => {
+                                let ^_v = __emit(value).spill()
+                                _v.load(r0)
+                                __asm.imov64(r1, 1000)
+                                __asm.div64(r0, r1)
+                                RegZeroSlot(self)
+                            },
+                            _ => throw BpfError('usecs() expects one argument')
+                        }
+                    },
+
+                    'msecs' => {
+                        match args {
+                            [ty.Arg({arg: value, *})] => {
+                                let ^_v = __emit(value).spill()
+                                _v.load(r0)
+                                __asm.imov64(r1, 1000000)
+                                __asm.div64(r0, r1)
+                                RegZeroSlot(self)
+                            },
+                            _ => throw BpfError('msecs() expects one argument')
+                        }
+                    },
+
+                    'secs' => {
+                        match args {
+                            [ty.Arg({arg: value, *})] => {
+                                let ^_v = __emit(value).spill()
+                                _v.load(r0)
+                                __asm.imov64(r1, 1000000000)
+                                __asm.div64(r0, r1)
+                                RegZeroSlot(self)
+                            },
+                            _ => throw BpfError('secs() expects one argument')
+                        }
+                    },
+
                     'print' => {
                         match args {
                             [ty.Arg({arg, *})] => {
@@ -2331,6 +2400,13 @@ pub class BpfProgram {
 
                     _ => throw BpfError("unknown function: {name}"),
                 }
+            },
+
+            // Scalar aggregation: foo = sum(bar) → rewrite to foo[0] = sum(bar)
+            ty.Assign(ty.Id({name, *}), value)
+            and let ty.Call({func: ty.Id({name: agg, *}), *}) = value
+            and agg in ['sum', 'count', 'min', 'max', 'avg', 'hist', 'lhist'] => {
+                __emit(ty.Assign(ty.Subscript(ty.Id({name}), ty.Int(0)), value))
             },
 
             // count(): sugar for sum(1)
@@ -4757,6 +4833,7 @@ pub class BpfContext {
     __cacheq: SharedQueue[(Int, String)]
     __cacher:  Thread[_]
     __running: Bool
+    __scalar-maps: Dict[String, BpfType]
     target-pid: Int | nil
     target-comm: String | nil
 
@@ -4769,6 +4846,7 @@ pub class BpfContext {
         __ctxs    = %{}
         __cache   = %{}
         __cacheq  = SharedQueue()
+        __scalar-maps = %{}
         __running = true
         __cacher  = Thread(__run-cacher)
         self.target-pid = target-pid
@@ -4880,6 +4958,31 @@ pub class BpfContext {
 
     maps -> Dict[String, map.BpfMap] {
         __maps
+    }
+
+    scalar-maps -> Dict[String, BpfType] {
+        __scalar-maps
+    }
+
+    mark-scalar(name: String, value-type: BpfType) {
+        __scalar-maps[name] = value-type
+    }
+
+    dump-map(name: String, m: _) {
+        match m {
+            m: map.Hash => do {
+                let entries = m.dump(self)
+                if name in __scalar-maps {
+                    match entries {
+                        [(_, v)] => v,
+                        _        => nil
+                    }
+                } else {
+                    %{k: v for (k, v) in entries}
+                }
+            },
+            _ => m
+        }
     }
 
     stacks -> map.StackTraces {

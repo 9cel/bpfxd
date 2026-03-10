@@ -1,0 +1,20 @@
+#!/usr/bin/env ty
+
+import bt (..)
+
+trace:syscalls:sys_enter_openat
+{
+    __opens[pid] = ctx.filename
+}
+
+trace:syscalls:sys_exit_openat
+{
+    let fname = __opens[pid]
+    if fname {
+        let fd = ctx.ret
+        print("{comm:-16} {tgid:-7} {pid:-7} {fd:4} {fname}\n")
+        delete(__opens[pid])
+    }
+}
+
+printf('%-16s %-7s %-7s %4s %s\n', 'COMM', 'PID', 'TID', 'FD', 'FILE')
