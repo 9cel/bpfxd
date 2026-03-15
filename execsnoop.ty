@@ -11,8 +11,15 @@ trace:syscalls:sys_enter_execve
         print(" {argv[i]:[quote]}")
         i = i + 1
     }
+}
 
-    print("\n")
+trace:syscalls:sys_exit_execve
+{
+    if ctx.ret == 0 {
+        print("\x1b[92m{..}\n")
+    } else {
+        print("\x1b[91m{..}\n")
+    }
 }
 
 printf('\n%-20s %-16s %-9s %-9s %s\n', 'TIME', 'COMM', 'TGID', 'PID', 'ARGS')

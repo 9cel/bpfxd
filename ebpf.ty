@@ -594,6 +594,8 @@ pub tag StackMap;
 pub tag UnknownType;
 pub tag Unit;
 pub tag Const;
+pub tag SixSeven;
+pub tag Kirkify;
 
 macro AnyMap = RingBuffer or BloomFilter or StackMap or Hash(_, _)
 macro AnyPtr(t) = UnknownPtr($$t) or MapPtr($$t) or KernelPtr($$t) or UserPtr($$t) or StackPtr($$t, _)
@@ -638,6 +640,8 @@ use BpfType =
   | Struct[Dict[String, (Int, BpfType)]]
   | Str[Int]
   | Unit
+  | SixSeven
+  | Kirkify
   | UnknownType
   | nil
 
@@ -1169,6 +1173,7 @@ fn __fixup-fmtspecs(node: _) -> _ {
             [__fixup-fmtspecs(c) for c in conds],
             __fixup-fmtspecs(a),
             __fixup-fmtspecs(b)
+
         ),
         ty.Call({func: ty.Id({name: 'print', *}), args: [ty.Arg({arg, *})], *}) =>
             match arg {
@@ -1217,25 +1222,38 @@ fn __fixup-fmtspecs(node: _) -> _ {
 fn __fixup-extract(node: _, fmts) -> _ {
     match node {
         ty.Block($xs)  => ty.Block([__fixup-extract(x, fmts) for x in xs]),
+
         ty.Multi($xs)  => ty.Multi([__fixup-extract(x, fmts) for x in xs]),
+
         ty.If(conds, a, b) => ty.If(
             [__fixup-extract(c, fmts) for c in conds],
             __fixup-extract(a, fmts),
             __fixup-extract(b, fmts)
         ),
+
         ty.Call($call) => ty.Call(
             func: __fixup-extract(call.func, fmts),
             args: [__fixup-extract(a, fmts) for a in call.args]
         ),
+
         ty.Arg($arg) => ty.Arg(
             arg: __fixup-extract(arg.arg, fmts),
             cond: if arg.?cond != nil { __fixup-extract(arg.cond, fmts) } else { nil },
             name: arg.?name
         ),
-        ty.Assign($a, $b) => ty.Assign(__fixup-extract(a, fmts), __fixup-extract(b, fmts)),
-        ty.Let($a, $b)    => ty.Let(__fixup-extract(a, fmts), __fixup-extract(b, fmts)),
-        ty.While([$cond], body) => ty.While([__fixup-extract(cond, fmts)], __fixup-extract(body, fmts)),
-        ty.Cond(cond, a, b) => ty.Cond(__fixup-extract(cond, fmts), __fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+
+        ty.Assign($a, $b)
+            => ty.Assign(__fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+
+        ty.Let($a, $b)
+            => ty.Let(__fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+
+        ty.While([$cond], body)
+            => ty.While([__fixup-extract(cond, fmts)], __fixup-extract(body, fmts)),
+
+        ty.Cond(cond, a, b)
+            => ty.Cond(__fixup-extract(cond, fmts), __fixup-extract(a, fmts), __fixup-extract(b, fmts)),
+
         ty.SpecialString($elems) => do {
             let walked = [__fixup-extract(e, fmts) for e in elems]
             let new-elems = [(nil, nil, #fmts, nil)]
@@ -1257,6 +1275,7 @@ fn __fixup-extract(node: _, fmts) -> _ {
             fmts.push(key)
             ty.SpecialString(new-elems)
         },
+
         _ => node
     }
 }
@@ -1291,15 +1310,16 @@ pub class BpfProgram {
         __env = %{}
         __loop-depth = 0
         __var-off = 16
-        __fmts = []
+        __fmts = context.fmts
         __strings = %{}
 
         __scratch = __var('__scratch')
         __scratch.type = UnknownPtr(U8)
         __scratch.map = map.Array(1, os.ncpu() * PER_CPU_SCRATCH)
 
-        ringbuf('__output')
         __output = __var('__output')
+        __output.type = RingBuffer
+        __output.map = context.output
 
         __zero = __var('__zero')
         __zero.map = map.PerCPUArray(1, 512)
@@ -1949,8 +1969,9 @@ pub class BpfProgram {
 
             ty.SpecialString(parts) => {
                 for match parts {
+                    (ty.DotDot(ty.Int(0), nil), _, _, _) => {}
                     ($expr, _, _, _) => __analyze(expr),
-                    _                => nil
+                    _                => {}
                 }
                 nil
             },
@@ -3090,10 +3111,18 @@ pub class BpfProgram {
 
                 for part, i in parts {
                     let i = #parts - i - 1
+                    let _fmt = __fmts[id][2*i + 1]
                     match part {
+                        (ty.DotDot(ty.Int(0), nil), _, _, _) => do {
+                            _fmt.type = SixSeven
+                        },
+
+                        (ty.Int(47), _, _, _) => do {
+                            _fmt.type = Kirkify
+                        },
+
                         ($expr, _, _, _) => do {
                             let t0 = __analyze(expr)
-                            let _fmt = __fmts[id][2*i + 1]
 
                             match t0 {
                                 AnyMap => do {
@@ -3170,17 +3199,10 @@ pub class BpfProgram {
                 __asm.mov64(r1, r7)
                 __asm.call(helper.dynptr_write)
 
-                // dynptr_write() tgid_pid at offset 4
+                // dynptr_write() pid at offset 4
                 __asm.imov64(r5, 0)
                 __asm.imov64(r4, 8)
-
-                __var('tgid').load(r3)
-                __asm.shl64i(r3, 32)
-                __var('cpu').load(r0)
-                __asm.or64(r3, r0)
-                _tmp.store(r3)
-                _tmp.load-addr(r3)
-
+                __var('pid').load-addr(r3)
                 __asm.imov64(r2, 4)
                 __asm.mov64(r1, r7)
                 __asm.call(helper.dynptr_write)
@@ -3535,18 +3557,10 @@ pub class BpfProgram {
         }
     }
 
-    ringbuf(name: String) -> map.RingBuffer {
-        if let $var = __env[name] {
-            var.map
-        } else {
-            let var = __var(name)
-            var.type = RingBuffer
-            var.map = map.RingBuffer()
-        }
-    }
-
     attach(event: PerfEvent) {
+        dbg(event)
         if event :: TraceEvent {
+            eprint("Adding tracepoint vars")
             __var('comm', size=16).type = Str(16)
             __var('pid').type = U32
             __var('tgid').type = U32
@@ -4823,19 +4837,22 @@ pub fn linear-histogram(data: IntoPtr[Int], lo: Int, hi: Int, step: Int) {
 }
 
 pub class BpfContext {
-    __progs:  Array[BpfProgram]
-    __maps:   Dict[String, map.BpfMap]
-    __stacks: map.StackTraces
-    __pidq:   map.RingBuffer
-    __pids:   map.LruHash
-    __ctxs:   Dict[String, dwarf::Context]
-    __cache:  Dict[Int, String]
-    __cacheq: SharedQueue[(Int, String)]
-    __cacher:  Thread[_]
-    __running: Bool
+    __progs:       Array[BpfProgram]
+    __maps:        Dict[String, map.BpfMap]
+    __stacks:      map.StackTraces
+    __pidq:        map.RingBuffer
+    __pids:        map.LruHash
+    __ctxs:        Dict[String, dwarf::Context]
+    __cache:       Dict[Int, String]
+    __cacheq:      SharedQueue[(Int, String)]
+    __cacher:      Thread[_]
+    __running:     Bool
     __scalar-maps: Dict[String, BpfType]
-    target-pid: Int | nil
-    target-comm: String | nil
+    __fmts:        Array[Array[String | {type: BpfType | nil, fmt: String | nil}]]
+    __output:      map.RingBuffer
+
+    target-pid:    Int | nil
+    target-comm:   String | nil
 
     init(target-pid: Int | nil = nil, target-comm: String | nil = nil) {
         __progs   = []
@@ -4843,6 +4860,8 @@ pub class BpfContext {
         __stacks  = map.StackTraces()
         __pidq    = map.RingBuffer()
         __pids    = map.LruHash(4, Time64)
+        __output  = map.RingBuffer()
+        __fmts    = []
         __ctxs    = %{}
         __cache   = %{}
         __cacheq  = SharedQueue()
@@ -4989,6 +5008,14 @@ pub class BpfContext {
         __stacks
     }
 
+    output -> map.RingBuffer {
+        __output
+    }
+
+    fmts -> Array[Array[String | {type: BpfType | nil, fmt: String | nil}]] {
+        __fmts
+    }
+
     dwarf-ctx(maps: String) -> dwarf::Context {
         match __ctxs[maps] {
             $ctx => ctx,
@@ -5115,18 +5142,31 @@ pub class BpfContext {
                     let tid = c.load(c.u64, ptr)
                     ptr += 8
 
-                    let specs = prog.strings[string-id]
+                    let specs = __fmts[string-id]
                     let buf = buffers[tid]
+                    let x67 = nil
+
+                    if specs.any?(match ({type: SixSeven, *}) => true else false) {
+                        x67 = buf.str!()
+                        buf.clear()
+                    }
 
                     for spec in specs {
                         match spec {
+                            {type: Kirkify, *} => do {
+                                if let $i = buf.search(0x01) {
+                                    buf.clear(0, i + 1)
+                                }
+                            },
+
                             {type: $t, fmt, fun, *} => {
-                                let val = value(t, ptr)
+                                let val = (t == SixSeven) ? x67 : value(t, ptr)
 
                                 let text  = fmt ? "{val:{fmt}}" : "{val}"
                                 buf.push(fun ? fun(text) : text)
 
                                 ptr += match t {
+                                    SixSeven   => 0,
                                     StringLike => do {
                                         let n: Int = cast(val.size())
                                         n + 1
